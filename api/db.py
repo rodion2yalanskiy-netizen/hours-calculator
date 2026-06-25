@@ -23,6 +23,25 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+# ── Обёртки для запросов из эндпоинтов (raw asyncpg, прямые SQL-строки) ────────
+async def fetch(sql: str, *args):
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        return await c.fetch(sql, *args)
+
+
+async def fetchrow(sql: str, *args):
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        return await c.fetchrow(sql, *args)
+
+
+async def execute(sql: str, *args):
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        return await c.execute(sql, *args)
+
+
 async def run_migrations() -> None:
     """Применить 001_init.sql + засеять бригаду под advisory-lock (владелец схемы)."""
     pool = await get_pool()

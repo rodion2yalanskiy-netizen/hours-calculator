@@ -10,40 +10,103 @@ import {
   type PreviewResult,
   type RoundResult,
 } from './api';
-import { hhmmToMinutes, fmtMoney, fmtHours } from './format';
+import { hhmmToMinutes, fmtMoney, fmtHours, fmtCardDate, fmtRangeAmPm } from './format';
 
-// ── Русские названия ──────────────────────────────────────────────────────────
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль',
   'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля',
   'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-const DAY_SHORT: Record<string, string> = {
-  'Понедельник': 'Пн', 'Вторник': 'Вт', 'Среда': 'Ср', 'Четверг': 'Чт',
-  'Пятница': 'Пт', 'Суббота': 'Сб', 'Воскресенье': 'Вс',
-};
+
+// ── Даты ──────────────────────────────────────────────────────────────────────
+const pad = (n: number) => String(n).padStart(2, '0');
+const isoOf = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const addDays = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+/** Понедельник недели, содержащей date. */
+const weekStart = (d: Date) => addDays(d, -(((d.getDay() + 6) % 7)));
+const weekEnd = (d: Date) => addDays(weekStart(d), 6);
+/** Номер недели в рамках месяца её понедельника (счётчик понедельников). */
+const weekNumOf = (d: Date) => Math.floor((weekStart(d).getDate() - 1) / 7) + 1;
+
+function weekRangeLabel(ws: Date, we: Date): string {
+  if (ws.getMonth() === we.getMonth()) {
+    return `${ws.getDate()}–${we.getDate()} ${MONTHS_GEN[we.getMonth()]}`;
+  }
+  return `${ws.getDate()} ${MONTHS_GEN[ws.getMonth()]} – ${we.getDate()} ${MONTHS_GEN[we.getMonth()]}`;
+}
 
 function todayISO(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return isoOf(new Date());
 }
 
-/** "2026-06-18" + "Четверг" → "Чт, 18 июня". */
-function cardDate(dateISO: string, dayOfWeek: string): string {
-  const day = parseInt(dateISO.slice(8, 10), 10);
-  const monIdx = parseInt(dateISO.slice(5, 7), 10) - 1;
-  const short = DAY_SHORT[dayOfWeek] ?? dayOfWeek;
-  return `${short}, ${day} ${MONTHS_GEN[monIdx] ?? ''}`;
-}
-
-function fireSuccessHaptic(tg: TgWebApp | null): void {
+function fireHaptic(tg: TgWebApp | null, kind: 'success' | 'impact'): void {
   const h = (tg as unknown as {
-    HapticFeedback?: { notificationOccurred?: (t: string) => void };
+    HapticFeedback?: {
+      notificationOccurred?: (t: string) => void;
+      impactOccurred?: (t: string) => void;
+    };
   } | null)?.HapticFeedback;
-  h?.notificationOccurred?.('success');
+  if (kind === 'success') h?.notificationOccurred?.('success');
+  else h?.impactOccurred?.('light');
 }
 
-// ── Inline SVG-иконки (без зависимостей; Tabler-стиль, stroke=currentColor) ────
+async function copyText(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch { /* фолбэк ниже */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand('copy'); } catch { /* no-op */ }
+  document.body.removeChild(ta);
+}
+
+// ── Тексты копирования ──────────────────────────────────────────────────────────
+function shiftDayText(s: Shift): string {
+  const lines = [fmtCardDate(s.date), s.object_name];
+  if (s.start_min != null && s.end_min != null) lines.push(fmtRangeAmPm(s.start_min, s.end_min));
+  lines.push(fmtHours(s.calculated_hours));
+  return lines.join('\n');
+}
+
+function weekText(weekN: number, range: string, shifts: Shift[]): string {
+  const header = `Неделя ${weekN} (${range})`;
+  const body = shifts.map(shiftDayText).join('\n\n');
+  const total = shifts.reduce((a, s) => a + (s.calculated_hours || 0), 0);
+  return `${header}\n\n${body}\n\nИтого за неделю: ${fmtHours(total)}`;
+}
+
+// ── Загрузка смен под режим ───────────────────────────────────────────────────
+async function loadPeriodShifts(initData: string, mode: Mode, cursor: Date): Promise<Shift[]> {
+  if (mode === 'month') {
+    const list = await listShifts(initData, cursor.getFullYear(), cursor.getMonth() + 1);
+    return [...list].sort((a, b) => a.date.localeCompare(b.date));
+  }
+  const ws = weekStart(cursor);
+  const we = weekEnd(cursor);
+  // Неделя может пересекать границу месяца → грузим оба месяца.
+  const keys = new Set([
+    `${ws.getFullYear()}-${ws.getMonth() + 1}`,
+    `${we.getFullYear()}-${we.getMonth() + 1}`,
+  ]);
+  const arrays = await Promise.all([...keys].map((k) => {
+    const [y, m] = k.split('-').map(Number);
+    return listShifts(initData, y, m);
+  }));
+  const lo = isoOf(ws);
+  const hi = isoOf(we);
+  return arrays.flat()
+    .filter((s) => s.date >= lo && s.date <= hi)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// ── Иконки (inline SVG, Tabler-стиль) ──────────────────────────────────────────
 type IconProps = { className?: string };
 const baseIcon = (className?: string) => ({
   width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none',
@@ -68,8 +131,17 @@ const IconRoad = ({ className }: IconProps) => (
 const IconFileText = ({ className }: IconProps) => (
   <svg {...baseIcon(className)}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5M9 13h6M9 17h6" /></svg>
 );
+const IconCopy = ({ className }: IconProps) => (
+  <svg {...baseIcon(className)}><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>
+);
+const IconChevL = ({ className }: IconProps) => (
+  <svg {...baseIcon(className)}><path d="M15 6l-6 6 6 6" /></svg>
+);
+const IconChevR = ({ className }: IconProps) => (
+  <svg {...baseIcon(className)}><path d="M9 6l6 6-6 6" /></svg>
+);
 
-// ── Вспомогательное по расчёту выбора ──────────────────────────────────────────
+// ── Выбор расчёта ─────────────────────────────────────────────────────────────
 function activeRound(p: PreviewResult | null, lunch: 'with' | 'without' | null): RoundResult | null {
   if (!p) return null;
   if (p.needs_lunch_choice) {
@@ -78,8 +150,6 @@ function activeRound(p: PreviewResult | null, lunch: 'with' | 'without' | null):
   }
   return p.round;
 }
-
-/** Краткий ярлык часов варианта обеда для кнопки. */
 function branchHoursLabel(r: RoundResult): string {
   return r.needs_round_choice
     ? `${fmtHours(r.hours_down)}–${fmtHours(r.hours_up)}`
@@ -87,6 +157,7 @@ function branchHoursLabel(r: RoundResult): string {
 }
 
 type Tab = 'shifts' | 'expenses' | 'mileage' | 'report';
+type Mode = 'month' | 'week';
 
 export default function App() {
   const [tg, setTg] = useState<TgWebApp | null>(null);
@@ -97,51 +168,82 @@ export default function App() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [tab, setTab] = useState<Tab>('shifts');
+  const [toast, setToast] = useState<string | null>(null);
 
-  const now = useMemo(() => new Date(), []);
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
+  const today = useMemo(() => new Date(), []);
+  const [mode, setMode] = useState<Mode>('month');
+  const [cursor, setCursor] = useState<Date>(() => new Date());
 
   const owner = useMemo(() => workers.find((w) => w.is_owner) ?? null, [workers]);
 
-  // ── Загрузка при старте ──
+  // ── Старт: подпись + бригада ──
   useEffect(() => {
     const app = getWebApp();
-    if (!app) {
-      setError('Открой приложение из Telegram.');
-      setLoading(false);
-      return;
-    }
+    if (!app) { setError('Открой приложение из Telegram.'); setLoading(false); return; }
     app.ready();
     app.expand();
     setTg(app);
     const id = app.initData;
-    if (!id) {
-      setError('Нет доступа (нет initData).');
-      setLoading(false);
-      return;
-    }
+    if (!id) { setError('Нет доступа (нет initData).'); setLoading(false); return; }
     setInitData(id);
-    Promise.all([listWorkers(id), listShifts(id, year, month)])
-      .then(([ws, sh]) => {
-        setWorkers(ws);
-        setShifts(sh);
-        setLoading(false);
-      })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : 'Ошибка загрузки');
-        setLoading(false);
-      });
-  }, [year, month]);
+    listWorkers(id)
+      .then((ws) => { setWorkers(ws); setLoading(false); })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : 'Ошибка загрузки'); setLoading(false); });
+  }, []);
+
+  // ── Загрузка смен под режим/период ──
+  const cursorTs = cursor.getTime();
+  useEffect(() => {
+    if (!initData) return;
+    let cancelled = false;
+    loadPeriodShifts(initData, mode, cursor)
+      .then((s) => { if (!cancelled) setShifts(s); })
+      .catch(() => { if (!cancelled) setShifts([]); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initData, mode, cursorTs]);
 
   const reloadShifts = () => {
     if (!initData) return;
-    listShifts(initData, year, month).then(setShifts).catch(() => {});
+    loadPeriodShifts(initData, mode, cursor).then(setShifts).catch(() => {});
   };
 
-  // ── Итоги месяца ──
-  const hoursMonth = shifts.reduce((a, s) => a + (s.calculated_hours || 0), 0);
-  const earnMonth = shifts.reduce((a, s) => a + (s.money ?? 0), 0);
+  const showToast = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast((t) => (t === msg ? null : t)), 1500);
+  };
+  const doCopy = async (text: string) => {
+    await copyText(text);
+    fireHaptic(tg, 'impact');
+    showToast('Скопировано');
+  };
+
+  // ── Навигация периода ──
+  const ws = weekStart(cursor);
+  const we = weekEnd(cursor);
+  const periodLabel = mode === 'month'
+    ? `${MONTHS_NOM[cursor.getMonth()]} ${cursor.getFullYear()}`
+    : `Неделя ${weekNumOf(cursor)} · ${weekRangeLabel(ws, we)}`;
+
+  const canForward = mode === 'month'
+    ? (cursor.getFullYear() < today.getFullYear()
+      || (cursor.getFullYear() === today.getFullYear() && cursor.getMonth() < today.getMonth()))
+    : weekStart(cursor).getTime() < weekStart(today).getTime();
+
+  const goPrev = () => setCursor((c) => mode === 'month'
+    ? new Date(c.getFullYear(), c.getMonth() - 1, 1)
+    : addDays(c, -7));
+  const goNext = () => {
+    if (!canForward) return;
+    setCursor((c) => mode === 'month'
+      ? new Date(c.getFullYear(), c.getMonth() + 1, 1)
+      : addDays(c, 7));
+  };
+  const switchMode = (m: Mode) => { setMode(m); setCursor(new Date()); };
+
+  // ── Итоги показанного набора ──
+  const hoursSum = shifts.reduce((a, s) => a + (s.calculated_hours || 0), 0);
+  const earnSum = shifts.reduce((a, s) => a + (s.money ?? 0), 0);
 
   // ── Форма ──
   const [showForm, setShowForm] = useState(false);
@@ -156,24 +258,16 @@ export default function App() {
   const [saving, setSaving] = useState(false);
 
   const openForm = () => {
-    setFDate(todayISO());
-    setFObject('');
-    setFStart('');
-    setFEnd('');
-    setPreview(null);
-    setPreviewErr(null);
-    setLunchChoice(null);
-    setRoundChoice(null);
+    setFDate(todayISO()); setFObject(''); setFStart(''); setFEnd('');
+    setPreview(null); setPreviewErr(null); setLunchChoice(null); setRoundChoice(null);
     setShowForm(true);
   };
 
-  // Пересчёт превью при изменении времени.
   useEffect(() => {
     if (!showForm || !initData) return;
     const sm = hhmmToMinutes(fStart);
     const em = hhmmToMinutes(fEnd);
-    setPreview(null);
-    setPreviewErr(null);
+    setPreview(null); setPreviewErr(null);
     if (Number.isNaN(sm) || Number.isNaN(em)) return;
     let cancelled = false;
     previewShift(initData, sm, em)
@@ -182,16 +276,12 @@ export default function App() {
     return () => { cancelled = true; };
   }, [fStart, fEnd, showForm, initData]);
 
-  // Дефолт «рекомендуемого»: обед — «Да −30» (with), округление — «Вверх» (up).
-  useEffect(() => {
-    setLunchChoice(preview?.needs_lunch_choice ? 'with' : null);
-  }, [preview]);
+  useEffect(() => { setLunchChoice(preview?.needs_lunch_choice ? 'with' : null); }, [preview]);
   useEffect(() => {
     const r = activeRound(preview, lunchChoice);
     setRoundChoice(r?.needs_round_choice ? 'up' : null);
   }, [preview, lunchChoice]);
 
-  // Финальные часы + был ли вычтен обед.
   const final = useMemo((): { hours: number; lunch_deducted: boolean } | null => {
     if (!preview) return null;
     const r = activeRound(preview, lunchChoice);
@@ -219,7 +309,7 @@ export default function App() {
         hours: final.hours,
         lunch_deducted: final.lunch_deducted,
       });
-      fireSuccessHaptic(tg);
+      fireHaptic(tg, 'success');
       setShowForm(false);
       reloadShifts();
     } catch (e) {
@@ -248,73 +338,86 @@ export default function App() {
     );
   }
 
-  const sortedShifts = [...shifts].reverse(); // новые сверху
+  // month: новые сверху; week: по возрастанию (Пн→Вс)
+  const listShiftsView = mode === 'month' ? [...shifts].reverse() : shifts;
 
   return (
-    <div className="min-h-screen bg-bg text-white">
+    <div className="min-h-screen bg-bg text-white relative">
       <div className="max-w-md mx-auto px-4 pt-6 pb-28">
         {tab === 'shifts' ? (
           <>
             {/* Шапка */}
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h1 className="text-2xl font-bold leading-tight">Смены</h1>
-                <p className="text-muted text-sm">{MONTHS_NOM[month - 1]} {year}</p>
-              </div>
+            <div className="flex items-center justify-between mb-4">
+              <h1 className="text-2xl font-bold leading-tight">Смены</h1>
               <div className="w-10 h-10 rounded-full bg-accent text-accentInk flex items-center justify-center font-bold">
                 {(owner?.name ?? '?').slice(0, 1)}
               </div>
             </div>
 
-            {/* Две плитки */}
+            {/* Переключатель Месяц/Неделя */}
+            <div className="grid grid-cols-2 gap-1 bg-surface2 rounded-2xl p-1 mb-3">
+              {(['month', 'week'] as Mode[]).map((m) => (
+                <button key={m} onClick={() => switchMode(m)}
+                  className={`rounded-xl py-2 text-sm font-semibold ${mode === m ? 'bg-accent text-accentInk' : 'text-muted'}`}>
+                  {m === 'month' ? 'Месяц' : 'Неделя'}
+                </button>
+              ))}
+            </div>
+
+            {/* Навигатор периода */}
+            <div className="flex items-center justify-between mb-5">
+              <button onClick={goPrev} className="w-9 h-9 rounded-full bg-surface2 text-muted flex items-center justify-center">
+                <IconChevL className="w-5 h-5" />
+              </button>
+              <span className="text-sm font-medium text-center">{periodLabel}</span>
+              <button onClick={goNext} disabled={!canForward}
+                className={`w-9 h-9 rounded-full flex items-center justify-center ${canForward ? 'bg-surface2 text-muted' : 'bg-surface2/40 text-faint'}`}>
+                <IconChevR className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Плитки */}
             <div className="grid grid-cols-2 gap-3 mb-5">
               <div className="bg-surface2 rounded-2xl p-4">
-                <p className="text-muted text-xs mb-1">Часы за месяц</p>
-                <p className="text-2xl font-bold">{fmtHours(hoursMonth)}</p>
+                <p className="text-muted text-xs mb-1">{mode === 'month' ? 'Часы за месяц' : 'Часы за неделю'}</p>
+                <p className="text-2xl font-bold">{fmtHours(hoursSum)}</p>
               </div>
               <div className="bg-accentDim rounded-2xl p-4">
                 <p className="text-muted text-xs mb-1 flex items-center gap-1">
                   <IconLock className="w-3.5 h-3.5" /> Заработок
                 </p>
-                <p className="text-2xl font-bold text-accent">{fmtMoney(earnMonth)}</p>
+                <p className="text-2xl font-bold text-accent">{fmtMoney(earnSum)}</p>
               </div>
             </div>
 
             {/* Кнопка / форма */}
             {!showForm ? (
-              <button
-                onClick={openForm}
-                className="w-full bg-accent text-accentInk font-semibold rounded-2xl py-4 mb-6 text-lg"
-              >
+              <button onClick={openForm}
+                className="w-full bg-accent text-accentInk font-semibold rounded-2xl py-4 mb-6 text-lg">
                 + Записать смену
               </button>
             ) : (
               ShiftForm()
             )}
 
-            {/* Список смен */}
-            {sortedShifts.length === 0 ? (
-              <p className="text-faint text-sm text-center py-8">Смен за этот месяц пока нет.</p>
+            {/* Список */}
+            {listShiftsView.length === 0 ? (
+              <p className="text-faint text-sm text-center py-8">Смен за этот период пока нет.</p>
             ) : (
               <div className="space-y-3">
-                {sortedShifts.map((s, i) => (
-                  <div key={i} className="bg-surface rounded-2xl p-4 flex items-center justify-between">
-                    <div className="min-w-0">
-                      <div className="text-sm text-muted">{cardDate(s.date, s.day_of_week)}</div>
-                      <div className="flex items-center gap-1 mt-1 font-medium truncate">
-                        <IconMapPin className="w-4 h-4 text-faint shrink-0" />
-                        <span className="truncate">{s.object_name}</span>
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0 pl-3">
-                      <div className="font-semibold">{fmtHours(s.calculated_hours)}</div>
-                      {s.count_money && s.money != null && (
-                        <div className="text-accent text-sm">{fmtMoney(s.money)}</div>
-                      )}
-                    </div>
-                  </div>
+                {listShiftsView.map((s, i) => (
+                  <ShiftCard key={i} s={s} ownerMoney={ownerMoney} onCopy={() => doCopy(shiftDayText(s))} />
                 ))}
               </div>
+            )}
+
+            {/* Копировать неделю */}
+            {mode === 'week' && shifts.length > 0 && (
+              <button
+                onClick={() => doCopy(weekText(weekNumOf(cursor), weekRangeLabel(ws, we), shifts))}
+                className="w-full mt-5 bg-accent text-accentInk font-semibold rounded-2xl py-3.5 flex items-center justify-center gap-2">
+                <IconCopy className="w-5 h-5" /> Скопировать неделю
+              </button>
             )}
           </>
         ) : (
@@ -324,6 +427,15 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Тост */}
+      {toast && (
+        <div className="absolute bottom-24 inset-x-0 flex justify-center pointer-events-none">
+          <div className="bg-surface text-accent text-sm font-medium px-4 py-2 rounded-full shadow-lg border border-white/5">
+            {toast}
+          </div>
+        </div>
+      )}
 
       {/* Нижняя навигация */}
       <nav className="fixed bottom-0 inset-x-0 bg-surface border-t border-white/5">
@@ -337,7 +449,7 @@ export default function App() {
     </div>
   );
 
-  // ── Подкомпонент: форма записи смены ──
+  // ── Форма записи смены ──
   function ShiftForm() {
     return (
       <div className="bg-surface rounded-2xl p-4 mb-6 space-y-4">
@@ -348,6 +460,7 @@ export default function App() {
 
         <label className="block">
           <span className="text-muted text-xs">Дата</span>
+          <div className="mt-1 font-medium">{fmtCardDate(fDate)}</div>
           <input type="date" value={fDate} onChange={(e) => setFDate(e.target.value)}
             className="mt-1 w-full bg-surface2 rounded-xl px-3 py-3 text-white outline-none" />
         </label>
@@ -359,22 +472,19 @@ export default function App() {
             className="mt-1 w-full bg-surface2 rounded-xl px-3 py-3 text-white outline-none placeholder:text-faint" />
         </label>
 
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block">
-            <span className="text-muted text-xs">Начало</span>
+        <div>
+          <span className="text-muted text-xs">Время</span>
+          <div className="mt-1 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
             <input type="time" value={fStart} onChange={(e) => setFStart(e.target.value)}
-              className="mt-1 w-full bg-surface2 rounded-xl px-3 py-3 text-white outline-none" />
-          </label>
-          <label className="block">
-            <span className="text-muted text-xs">Конец</span>
+              className="bg-surface2 rounded-xl px-3 py-3 text-white outline-none" />
+            <span className="text-muted">—</span>
             <input type="time" value={fEnd} onChange={(e) => setFEnd(e.target.value)}
-              className="mt-1 w-full bg-surface2 rounded-xl px-3 py-3 text-white outline-none" />
-          </label>
+              className="bg-surface2 rounded-xl px-3 py-3 text-white outline-none" />
+          </div>
         </div>
 
         {previewErr && <p className="text-red-400 text-sm">{previewErr}</p>}
 
-        {/* Выбор обеда */}
         {preview?.needs_lunch_choice && (
           <div>
             <p className="text-muted text-xs mb-2">Вычитать обед?</p>
@@ -387,12 +497,10 @@ export default function App() {
           </div>
         )}
 
-        {/* Зелёная плашка обеда, когда выбора нет, но обед вычтен */}
         {preview && !preview.needs_lunch_choice && preview.lunch_deducted && (
           <div className="bg-okfill text-okline rounded-xl px-3 py-2 text-sm">Обед вычтен −30 мин</div>
         )}
 
-        {/* Выбор округления (для активного варианта) */}
         {(() => {
           const r = activeRound(preview, lunchChoice);
           if (!r || !r.needs_round_choice) return null;
@@ -409,15 +517,12 @@ export default function App() {
           );
         })()}
 
-        {/* Итого */}
         {final && (
           <div className="flex items-center justify-between border-t border-white/5 pt-3">
             <span className="text-muted">Итого</span>
             <span className="text-right">
               <span className="font-bold text-lg">{fmtHours(final.hours)}</span>
-              {ownerMoney && (
-                <span className="text-accent ml-2 font-semibold">{fmtMoney(final.hours * 25)}</span>
-              )}
+              {ownerMoney && <span className="text-accent ml-2 font-semibold">{fmtMoney(final.hours * 25)}</span>}
             </span>
           </div>
         )}
@@ -431,7 +536,32 @@ export default function App() {
   }
 }
 
-// ── Мелкие подкомпоненты ────────────────────────────────────────────────────────
+// ── Карточка смены ──────────────────────────────────────────────────────────────
+function ShiftCard({ s, ownerMoney, onCopy }: { s: Shift; ownerMoney: boolean; onCopy: () => void }) {
+  const showMoney = ownerMoney && s.count_money && s.money != null;
+  return (
+    <div className="bg-surface rounded-2xl p-4 flex items-start justify-between">
+      <div className="min-w-0">
+        <div className="font-medium">{fmtCardDate(s.date)}</div>
+        <div className="flex items-center gap-1 mt-1 text-muted text-sm truncate">
+          <IconMapPin className="w-4 h-4 text-faint shrink-0" />
+          <span className="truncate">{s.object_name}</span>
+        </div>
+        {s.start_min != null && s.end_min != null && (
+          <div className="text-accent/70 text-sm mt-1">{fmtRangeAmPm(s.start_min, s.end_min)}</div>
+        )}
+      </div>
+      <div className="text-right shrink-0 pl-3 flex flex-col items-end">
+        <div className="font-semibold">{fmtHours(s.calculated_hours)}</div>
+        {showMoney && <div className="text-accent text-sm">{fmtMoney(s.money as number)}</div>}
+        <button onClick={onCopy} className="mt-2 text-faint hover:text-muted" aria-label="Скопировать">
+          <IconCopy className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ChoiceBtn({ selected, onClick, title, sub }: {
   selected: boolean; onClick: () => void; title: string; sub: string;
 }) {

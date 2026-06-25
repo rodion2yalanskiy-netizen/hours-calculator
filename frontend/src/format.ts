@@ -33,3 +33,30 @@ export function fmtHours(h: number): string {
   const s = Number.isInteger(h) ? String(h) : String(h).replace('.', ',');
   return `${s} ч`;
 }
+
+// getDay(): 0=воскресенье.
+const RU_DAYS_FULL = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+const RU_MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля',
+  'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+/** "2026-06-24" → локальная Date (без сдвига часового пояса). */
+function parseISO(dateISO: string): Date {
+  const [y, m, d] = dateISO.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+/** ISO-дата → полное рус. название дня ("Среда"). */
+export function fullDayName(dateISO: string): string {
+  return RU_DAYS_FULL[parseISO(dateISO).getDay()];
+}
+
+/** "2026-06-24" → "Среда, 24 июня" (полный день + число + месяц родительный, без года). */
+export function fmtCardDate(dateISO: string): string {
+  const dt = parseISO(dateISO);
+  return `${RU_DAYS_FULL[dt.getDay()]}, ${dt.getDate()} ${RU_MONTHS_GEN[dt.getMonth()]}`;
+}
+
+/** (480, 1020) → "8:00 AM – 5:00 PM". */
+export function fmtRangeAmPm(startMin: number, endMin: number): string {
+  return `${minutesToAmPm(startMin)} – ${minutesToAmPm(endMin)}`;
+}

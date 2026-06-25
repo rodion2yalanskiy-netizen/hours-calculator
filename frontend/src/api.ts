@@ -46,6 +46,8 @@ export interface Shift {
   count_money: boolean;
   calculated_hours: number;
   money: number | null;
+  start_min: number | null;
+  end_min: number | null;
 }
 
 /** Один сценарий округления из /shifts/preview. */

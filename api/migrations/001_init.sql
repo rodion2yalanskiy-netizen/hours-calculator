@@ -78,3 +78,28 @@ CREATE TABLE IF NOT EXISTS settings (
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- ── Бригада (работники) — Слой 1а ────────────────────────────────────────────
+-- Список людей, чьи смены ведём. Привязка к владельцу системы (user_id), как везде.
+-- Удаление — мягкое, через active=false (историю смен не рвём).
+-- ЗАСЕВ стартовой бригады делает КОД api на старте (из OWNER_ID, идемпотентно),
+-- здесь — только структура (личный id владельца в SQL/git не попадает).
+CREATE TABLE IF NOT EXISTS workers (
+    id          bigserial PRIMARY KEY,
+    user_id     bigint  NOT NULL,                    -- владелец системы (как в shifts/weeks/...)
+    name        text    NOT NULL,                    -- имя работника
+    is_owner    boolean NOT NULL DEFAULT false,      -- это сам владелец (Родион)
+    count_money boolean NOT NULL DEFAULT false,      -- считать ли деньги по этому человеку
+    active      boolean NOT NULL DEFAULT true,       -- сейчас в бригаде / убран
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, name)                           -- нужно для идемпотентного засева (ON CONFLICT)
+);
+CREATE INDEX IF NOT EXISTS idx_workers_user_active ON workers (user_id, active);
+
+-- ── shifts: "чья это смена" ───────────────────────────────────────────────────
+-- Nullable: старые/неуказанные смены не ломаются (данных пока нет → миграция мгновенна).
+-- ON DELETE SET NULL: жёсткое удаление работника не уносит смену (штатно — мягко через active).
+ALTER TABLE shifts
+    ADD COLUMN IF NOT EXISTS worker_id bigint REFERENCES workers (id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_shifts_worker ON shifts (worker_id);

@@ -30,6 +30,11 @@ def _hhmm(t: time | None) -> str | None:
     return t.strftime("%H:%M") if t is not None else None
 
 
+def _time_to_min(t: time | None) -> int | None:
+    """datetime.time → минуты от полуночи (для фронта). None → None."""
+    return t.hour * 60 + t.minute if t is not None else None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Единственный владелец схемы: применяем миграцию на старте (идемпотентно, под lock).
@@ -210,7 +215,7 @@ async def list_shifts(
 ):
     rows = await db.fetch(
         "SELECT s.date, s.day_of_week, s.object_name, s.worker_id, s.calculated_hours, "
-        "       w.name AS worker_name, w.count_money "
+        "       s.start_time, s.end_time, w.name AS worker_name, w.count_money "
         "FROM shifts s LEFT JOIN workers w ON w.id = s.worker_id "
         "WHERE s.user_id=$1 AND s.year=$2 AND s.month=$3 "
         "ORDER BY s.date",
@@ -228,6 +233,9 @@ async def list_shifts(
             "worker_name": r["worker_name"],
             "count_money": count_money,
             "calculated_hours": hours,
+            # TIME → минуты от полуночи (фронт форматирует в AM/PM). None если не задано.
+            "start_min": _time_to_min(r["start_time"]),
+            "end_min": _time_to_min(r["end_time"]),
             # owner-only API → деньги показываем владельцу; только для count_money работников.
             "money": calc.money(hours) if count_money else None,
         })

@@ -1,40 +1,58 @@
-// Запросы к API. Все эндпоинты owner-only → шлём заголовок X-Telegram-Init-Data.
+// Запросы к API. Авторизация — JWT в заголовке Authorization: Bearer <token>.
 
 const API_URL = import.meta.env.VITE_API_URL;
+const TOKEN_KEY = 'jwt_token';
 
-/** Базовая обёртка: ставит подпись, обрабатывает 401/403/!ok, возвращает json. */
-export async function apiFetch<T>(
-  path: string,
-  initData: string,
-  options: RequestInit = {},
-): Promise<T> {
+export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
+export const setToken = (t: string): void => localStorage.setItem(TOKEN_KEY, t);
+export const clearToken = (): void => localStorage.removeItem(TOKEN_KEY);
+
+/** Событие, на которое AuthProvider реагирует разлогином (401 от защищённого запроса). */
+export const AUTH_UNAUTHORIZED = 'auth:unauthorized';
+
+async function errorDetail(res: Response): Promise<string> {
+  try {
+    const j = await res.json();
+    if (j && typeof j.detail === 'string') return j.detail;
+  } catch { /* тело не json */ }
+  return `Ошибка API: ${res.status}`;
+}
+
+/** Авторизованный запрос. 401 → чистим токен и шлём событие разлогина. */
+export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!API_URL) throw new Error('VITE_API_URL не задан');
+  const token = getToken();
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
     headers: {
-      'X-Telegram-Init-Data': initData,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers ?? {}),
     },
   });
-  if (res.status === 401) throw new Error('Подпись не прошла (401)');
-  if (res.status === 403) throw new Error('Доступ только владельцу (403)');
-  if (!res.ok) throw new Error(`Ошибка API: ${res.status}`);
+  if (res.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event(AUTH_UNAUTHORIZED));
+    throw new Error('Сессия истекла (401)');
+  }
+  if (!res.ok) throw new Error(await errorDetail(res));
   return (await res.json()) as T;
 }
 
 // ── Типы ──────────────────────────────────────────────────────────────────────
-export interface Me {
-  id: number;
-  name: string;
-  username?: string;
+export interface User {
+  id: string;                       // users.id (UUID)
+  email: string;
+  full_name: string;
+  role: 'supervisor' | 'worker';
+  hourly_rate: number;
+  worker_id: number | null;
 }
 
 export interface Worker {
   id: number;
   name: string;
   is_owner: boolean;
-  count_money: boolean;
 }
 
 export interface Shift {
@@ -43,22 +61,20 @@ export interface Shift {
   object_name: string;
   worker_id: number;
   worker_name: string | null;
-  count_money: boolean;
   calculated_hours: number;
-  money: number | null;
+  hourly_rate: number;
+  money: number;
   start_min: number | null;
   end_min: number | null;
 }
 
-/** Один сценарий округления из /shifts/preview. */
 export type RoundResult =
   | { needs_round_choice: false; hours: number }
   | { needs_round_choice: true; hours_down: number; hours_up: number };
 
-/** Ответ /shifts/preview. */
 export type PreviewResult =
-  | { needs_lunch_choice: true; with_lunch: RoundResult; without_lunch: RoundResult }
-  | { needs_lunch_choice: false; lunch_deducted: boolean; round: RoundResult };
+  | { needs_lunch_choice: true; with_lunch: RoundResult; without_lunch: RoundResult; hourly_rate: number }
+  | { needs_lunch_choice: false; lunch_deducted: boolean; round: RoundResult; hourly_rate: number };
 
 export interface ShiftCreateBody {
   worker_id: number;
@@ -70,37 +86,146 @@ export interface ShiftCreateBody {
   lunch_deducted: boolean;
 }
 
-// ── Функции ─────────────────────────────────────────────────────────────────────
-export async function fetchMe(initData: string): Promise<Me> {
-  return apiFetch<Me>('/me', initData);
+export interface TeamMember {
+  worker_id: number;
+  user_id: string;
+  email: string;
+  full_name: string;
+  role: 'supervisor' | 'worker';
+  hourly_rate: number;
+  is_active: boolean;
+  created_at: string;
 }
 
-export async function listWorkers(initData: string): Promise<Worker[]> {
-  return apiFetch<Worker[]>('/workers', initData);
+export interface Payout {
+  id: string;
+  worker_id: number;
+  week_start: string;
+  week_end: string;
+  amount_paid: number;
+  shortfall_reason: 'debt' | 'fine' | null;
+  shortfall_note: string | null;
+  paid_at: string;
+  earned_by_hours: number;
+  bonus: number;
+  shortfall: number;
 }
 
-export async function previewShift(
-  initData: string,
-  start_min: number,
-  end_min: number,
-): Promise<PreviewResult> {
-  return apiFetch<PreviewResult>('/shifts/preview', initData, {
+export interface WeeklySummary {
+  worker_id: number;
+  worker_name: string | null;
+  week_start: string;
+  week_end: string;
+  shifts_count: number;
+  total_hours: number;
+  earned_by_hours: number;
+  payout: { amount_paid: number; shortfall_reason: string | null; shortfall_note: string | null; paid_at: string } | null;
+  bonus: number;
+  shortfall: number;
+  status: 'paid' | 'unpaid' | 'shortfall_debt' | 'shortfall_fine' | 'bonus';
+}
+
+// ── Аутентификация ────────────────────────────────────────────────────────────
+interface LoginResponse {
+  token: string;
+  user: { id: string; full_name: string; role: 'supervisor' | 'worker'; hourly_rate: number };
+}
+
+/** Логин. НЕ шлёт событие разлогина на 401 — возвращает понятную ошибку. */
+export async function login(email: string, password: string): Promise<string> {
+  if (!API_URL) throw new Error('VITE_API_URL не задан');
+  const res = await fetch(`${API_URL}/auth/login`, {
     method: 'POST',
-    body: JSON.stringify({ start_min, end_min }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (res.status === 401) throw new Error('Неверный email или пароль');
+  if (!res.ok) throw new Error(await errorDetail(res));
+  const data = (await res.json()) as LoginResponse;
+  setToken(data.token);
+  return data.token;
+}
+
+export async function me(): Promise<User> {
+  return apiFetch<User>('/auth/me');
+}
+
+export async function changePassword(old_password: string, new_password: string): Promise<void> {
+  await apiFetch<{ ok: boolean }>('/auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ old_password, new_password }),
   });
 }
 
-export async function createShift(initData: string, body: ShiftCreateBody): Promise<Shift> {
-  return apiFetch<Shift>('/shifts', initData, {
+// ── Смены / работники ─────────────────────────────────────────────────────────
+export async function getWorkers(): Promise<Worker[]> {
+  return apiFetch<Worker[]>('/workers');
+}
+
+export async function previewShift(start_min: number, end_min: number, worker_id?: number): Promise<PreviewResult> {
+  return apiFetch<PreviewResult>('/shifts/preview', {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify({ start_min, end_min, ...(worker_id != null ? { worker_id } : {}) }),
   });
 }
 
-export async function listShifts(
-  initData: string,
-  year: number,
-  month: number,
-): Promise<Shift[]> {
-  return apiFetch<Shift[]>(`/shifts?year=${year}&month=${month}`, initData);
+export async function createShift(body: ShiftCreateBody): Promise<Shift> {
+  return apiFetch<Shift>('/shifts', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function getShifts(year: number, month: number, worker_id?: number): Promise<Shift[]> {
+  const q = new URLSearchParams({ year: String(year), month: String(month) });
+  if (worker_id != null) q.set('worker_id', String(worker_id));
+  return apiFetch<Shift[]>(`/shifts?${q.toString()}`);
+}
+
+// ── Команда (экраны — Layer 4b) ────────────────────────────────────────────────
+export async function getTeam(): Promise<TeamMember[]> {
+  return apiFetch<TeamMember[]>('/team');
+}
+export async function createTeamMember(body: {
+  email: string; password: string; full_name: string; hourly_rate: number;
+}): Promise<TeamMember> {
+  return apiFetch<TeamMember>('/team', { method: 'POST', body: JSON.stringify(body) });
+}
+export async function updateTeamMember(userId: string, body: {
+  full_name?: string; hourly_rate?: number; is_active?: boolean; new_password?: string;
+}): Promise<TeamMember> {
+  return apiFetch<TeamMember>(`/team/${userId}`, { method: 'PATCH', body: JSON.stringify(body) });
+}
+
+// ── Выплаты (экраны — Layer 4c) ────────────────────────────────────────────────
+export async function getPayouts(params: { worker_id?: number; from?: string; to?: string } = {}): Promise<Payout[]> {
+  const q = new URLSearchParams();
+  if (params.worker_id != null) q.set('worker_id', String(params.worker_id));
+  if (params.from) q.set('from', params.from);
+  if (params.to) q.set('to', params.to);
+  const qs = q.toString();
+  return apiFetch<Payout[]>(`/payouts${qs ? `?${qs}` : ''}`);
+}
+export async function createPayout(body: {
+  week_start: string; week_end: string; amount_paid: number;
+  shortfall_reason?: 'debt' | 'fine'; shortfall_note?: string;
+}): Promise<Payout> {
+  return apiFetch<Payout>('/payouts', { method: 'POST', body: JSON.stringify(body) });
+}
+export async function updatePayout(id: string, body: {
+  amount_paid?: number; shortfall_reason?: 'debt' | 'fine'; shortfall_note?: string;
+}): Promise<Payout> {
+  return apiFetch<Payout>(`/payouts/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+}
+export async function deletePayout(id: string): Promise<void> {
+  await apiFetch<{ ok: boolean }>(`/payouts/${id}`, { method: 'DELETE' });
+}
+
+// ── Сводки (экраны — Layer 4d) ─────────────────────────────────────────────────
+export async function getSummaryWeekly(week_start: string, worker_id?: number): Promise<WeeklySummary> {
+  const q = new URLSearchParams({ week_start });
+  if (worker_id != null) q.set('worker_id', String(worker_id));
+  return apiFetch<WeeklySummary>(`/summary/weekly?${q.toString()}`);
+}
+export async function getSummaryPeriod(from: string, to: string, worker_id?: number): Promise<unknown> {
+  const q = new URLSearchParams({ from, to });
+  if (worker_id != null) q.set('worker_id', String(worker_id));
+  return apiFetch<unknown>(`/summary/period?${q.toString()}`);
 }

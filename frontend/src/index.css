@@ -10,6 +10,6 @@ body,
 
 body {
   margin: 0;
-  background: #15110a;
   -webkit-font-smoothing: antialiased;
+  @apply bg-bg text-text;
 }

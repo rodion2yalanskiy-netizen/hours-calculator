@@ -103,3 +103,60 @@ CREATE INDEX IF NOT EXISTS idx_workers_user_active ON workers (user_id, active);
 ALTER TABLE shifts
     ADD COLUMN IF NOT EXISTS worker_id bigint REFERENCES workers (id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_shifts_worker ON shifts (worker_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Слой 2: аутентификация (users), snapshot ставки в сменах, недельные выплаты.
+-- Идемпотентно (IF NOT EXISTS / IF EXISTS), применяется тем же run_migrations()
+-- под advisory-lock. gen_random_uuid() — встроенная в PostgreSQL 13+ (Railway PG16).
+--
+-- ПРИМЕЧАНИЕ ПО ТИПАМ: в исходном ТЗ ссылки на работника были UUID, но фактически
+-- workers.id — bigserial (bigint). Поэтому users.worker_id и weekly_payouts.worker_id
+-- объявлены как bigint REFERENCES workers(id) — иначе внешний ключ не создать.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ── Пользователи веб-приложения (логин / роль / личная ставка) ───────────────
+CREATE TABLE IF NOT EXISTS users (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         text UNIQUE NOT NULL,
+    password_hash text NOT NULL,
+    full_name     text NOT NULL,
+    role          text NOT NULL CHECK (role IN ('supervisor', 'worker')),
+    worker_id     bigint REFERENCES workers (id),   -- workers.id = bigserial (bigint)
+    hourly_rate   numeric(6,2) NOT NULL,
+    is_active     boolean NOT NULL DEFAULT true,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_users_worker_id ON users (worker_id);
+
+-- ── shifts: фиксация ставки на момент смены (snapshot) ────────────────────────
+-- Историческая справедливость: существующие смены → $25 (ставка Родиона до 25 июня).
+-- Новые смены по умолчанию 27.00 (текущая ставка); в Слое 3 будем проставлять
+-- ставку конкретного работника явно. DEFAULT нужен, чтобы create_shift (который в
+-- Слое 2 не меняем) не падал на NOT NULL при вставке без этого поля.
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS hourly_rate_snapshot numeric(6,2);
+UPDATE shifts SET hourly_rate_snapshot = 25.00 WHERE hourly_rate_snapshot IS NULL;
+ALTER TABLE shifts ALTER COLUMN hourly_rate_snapshot SET DEFAULT 27.00;
+ALTER TABLE shifts ALTER COLUMN hourly_rate_snapshot SET NOT NULL;
+
+-- ── workers: count_money больше не нужен (все считают деньги) ─────────────────
+ALTER TABLE workers DROP COLUMN IF EXISTS count_money;
+
+-- ── Недельные выплаты от босса работнику ─────────────────────────────────────
+-- earned_by_hours НЕ храним — считается на лету из shifts за неделю (Слой 3).
+--   shortfall_reason IS NULL → недоплаты нет (amount_paid >= earned)
+--   shortfall_reason='debt'  → босс недоплатил, обещал вернуть (переносится)
+--   shortfall_reason='fine'  → штраф за ошибку (обязателен shortfall_note; проверка в API)
+CREATE TABLE IF NOT EXISTS weekly_payouts (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    worker_id        bigint NOT NULL REFERENCES workers (id),  -- workers.id = bigserial
+    week_start       date NOT NULL,                            -- понедельник недели
+    week_end         date NOT NULL,                            -- воскресенье недели
+    amount_paid      numeric(8,2) NOT NULL,                    -- сколько реально заплатил босс
+    shortfall_reason text CHECK (shortfall_reason IN ('debt', 'fine')),
+    shortfall_note   text,
+    paid_at          timestamptz NOT NULL DEFAULT now(),
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (worker_id, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_payouts_worker_week ON weekly_payouts (worker_id, week_start);

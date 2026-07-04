@@ -1,7 +1,9 @@
-"""Калькулятор часов — API (FastAPI). Слой 0: только /health и /me.
+"""Калькулятор часов — API (FastAPI).
 
-/me — принимает initData в заголовке X-Telegram-Init-Data, проверяет подпись
-и owner-id (через require_owner), возвращает {id, name, username} или 401/403.
+Слой 2: аутентификация по JWT. Все прежние эндпоинты (/me, /workers, /shifts)
+теперь требуют Bearer-токен через require_auth (вместо Telegram require_owner).
+Логика фильтрации данных НЕ менялась — это Слой 3. count_money убран: деньги
+считаются всегда.
 """
 from contextlib import asynccontextmanager
 from datetime import date as date_cls, time
@@ -10,7 +12,8 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from auth import require_owner
+from deps import require_auth
+from auth import router as auth_router
 from db import run_migrations
 from config import CORS_ORIGIN
 import calc
@@ -37,7 +40,7 @@ def _time_to_min(t: time | None) -> int | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Единственный владелец схемы: применяем миграцию на старте (идемпотентно, под lock).
+    # Единственный владелец схемы: применяем миграцию + сиды на старте (идемпотентно, под lock).
     await run_migrations()
     yield
 
@@ -50,8 +53,11 @@ app.add_middleware(
     allow_origins=["*"] if CORS_ORIGIN == "*" else [CORS_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=False,  # initData идёт в заголовке, cookie-креды не нужны
+    allow_credentials=False,  # JWT идёт в заголовке Authorization, cookie-креды не нужны
 )
+
+# Роутер аутентификации: /auth/login, /auth/me, /auth/change-password.
+app.include_router(auth_router)
 
 
 @app.get("/health")
@@ -60,18 +66,15 @@ async def health():
 
 
 @app.get("/me")
-async def me(user=Depends(require_owner)):
-    name = (user.first_name or "")
-    if user.last_name:
-        name = f"{name} {user.last_name}".strip()
-    return {"id": user.id, "name": name.strip(), "username": user.username}
+async def me(user=Depends(require_auth)):
+    # Совместимость со старым ответом {id, name, username}; данные — из JWT-пользователя.
+    return {"id": user.user_id, "name": user.full_name, "username": None}
 
 
 # ── Слой 1а: бригада (workers) ────────────────────────────────────────────────
 class WorkerCreate(BaseModel):
     name: str
     is_owner: bool = False
-    count_money: bool = False
 
 
 class WorkerPatch(BaseModel):
@@ -80,9 +83,9 @@ class WorkerPatch(BaseModel):
 
 
 @app.get("/workers")
-async def list_workers(user=Depends(require_owner)):
+async def list_workers(user=Depends(require_auth)):
     rows = await db.fetch(
-        "SELECT id, name, is_owner, count_money FROM workers "
+        "SELECT id, name, is_owner FROM workers "
         "WHERE user_id=$1 AND active=true ORDER BY is_owner DESC, name",
         user.id,
     )
@@ -90,21 +93,21 @@ async def list_workers(user=Depends(require_owner)):
 
 
 @app.post("/workers")
-async def create_worker(body: WorkerCreate, user=Depends(require_owner)):
+async def create_worker(body: WorkerCreate, user=Depends(require_auth)):
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
     row = await db.fetchrow(
-        "INSERT INTO workers (user_id, name, is_owner, count_money, active) "
-        "VALUES ($1, $2, $3, $4, true) "
+        "INSERT INTO workers (user_id, name, is_owner, active) "
+        "VALUES ($1, $2, $3, true) "
         "ON CONFLICT (user_id, name) DO NOTHING "
-        "RETURNING id, name, is_owner, count_money, active",
-        user.id, name, body.is_owner, body.count_money,
+        "RETURNING id, name, is_owner, active",
+        user.id, name, body.is_owner,
     )
     if row is None:
         # конфликт по (user_id, name) — вернём существующего
         row = await db.fetchrow(
-            "SELECT id, name, is_owner, count_money, active FROM workers "
+            "SELECT id, name, is_owner, active FROM workers "
             "WHERE user_id=$1 AND name=$2",
             user.id, name,
         )
@@ -112,7 +115,7 @@ async def create_worker(body: WorkerCreate, user=Depends(require_owner)):
 
 
 @app.patch("/workers/{worker_id}")
-async def patch_worker(worker_id: int, body: WorkerPatch, user=Depends(require_owner)):
+async def patch_worker(worker_id: int, body: WorkerPatch, user=Depends(require_auth)):
     sets, args = [], []
     if body.name is not None:
         name = body.name.strip()
@@ -130,7 +133,7 @@ async def patch_worker(worker_id: int, body: WorkerPatch, user=Depends(require_o
     row = await db.fetchrow(
         f"UPDATE workers SET {', '.join(sets)} "
         f"WHERE id=${len(args) - 1} AND user_id=${len(args)} "
-        f"RETURNING id, name, is_owner, count_money, active",
+        f"RETURNING id, name, is_owner, active",
         *args,
     )
     if row is None:
@@ -155,20 +158,20 @@ class ShiftCreate(BaseModel):
 
 
 @app.post("/shifts/preview")
-async def shifts_preview(body: PreviewBody, user=Depends(require_owner)):
+async def shifts_preview(body: PreviewBody, user=Depends(require_auth)):
     # Чистый расчёт без записи — для кнопок (обед/округление) на фронте.
     return calc.preview_shift(body.start_min, body.end_min)
 
 
 @app.post("/shifts")
-async def create_shift(body: ShiftCreate, user=Depends(require_owner)):
+async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
     object_name = body.object_name.strip()
     if not object_name:
         raise HTTPException(status_code=400, detail="object_name is required")
 
     # worker_id должен быть активным работником ЭТОГО владельца.
     worker = await db.fetchrow(
-        "SELECT id, count_money FROM workers WHERE id=$1 AND user_id=$2 AND active=true",
+        "SELECT id FROM workers WHERE id=$1 AND user_id=$2 AND active=true",
         body.worker_id, user.id,
     )
     if worker is None:
@@ -180,6 +183,8 @@ async def create_shift(body: ShiftCreate, user=Depends(require_owner)):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
     day_of_week = _RU_DAYS[d.weekday()]
 
+    # hourly_rate_snapshot не задаём явно — колонка имеет DEFAULT 27.00 (Слой 2).
+    # В Слое 3 будем проставлять ставку конкретного работника на момент смены.
     shift = await db.fetchrow(
         "INSERT INTO shifts "
         "(user_id, worker_id, date, day_of_week, object_name, start_time, end_time, calculated_hours) "
@@ -190,8 +195,6 @@ async def create_shift(body: ShiftCreate, user=Depends(require_owner)):
     )
 
     hours = float(shift["calculated_hours"])
-    # Деньги считаем ТОЛЬКО если у работника count_money=true, иначе NULL.
-    money = calc.money(hours) if worker["count_money"] else None
     return {
         "id": shift["id"],
         "worker_id": shift["worker_id"],
@@ -202,8 +205,7 @@ async def create_shift(body: ShiftCreate, user=Depends(require_owner)):
         "end_time": _hhmm(shift["end_time"]),
         "calculated_hours": hours,
         "lunch_deducted": body.lunch_deducted,
-        "count_money": worker["count_money"],
-        "money": money,
+        "money": calc.money(hours),  # деньги считаем всегда (count_money убран)
     }
 
 
@@ -211,11 +213,11 @@ async def create_shift(body: ShiftCreate, user=Depends(require_owner)):
 async def list_shifts(
     year: int = Query(...),
     month: int = Query(...),
-    user=Depends(require_owner),
+    user=Depends(require_auth),
 ):
     rows = await db.fetch(
         "SELECT s.date, s.day_of_week, s.object_name, s.worker_id, s.calculated_hours, "
-        "       s.start_time, s.end_time, w.name AS worker_name, w.count_money "
+        "       s.start_time, s.end_time, w.name AS worker_name "
         "FROM shifts s LEFT JOIN workers w ON w.id = s.worker_id "
         "WHERE s.user_id=$1 AND s.year=$2 AND s.month=$3 "
         "ORDER BY s.date",
@@ -224,19 +226,16 @@ async def list_shifts(
     result = []
     for r in rows:
         hours = float(r["calculated_hours"]) if r["calculated_hours"] is not None else 0.0
-        count_money = bool(r["count_money"])
         result.append({
             "date": r["date"].isoformat(),
             "day_of_week": r["day_of_week"],
             "object_name": r["object_name"],
             "worker_id": r["worker_id"],
             "worker_name": r["worker_name"],
-            "count_money": count_money,
             "calculated_hours": hours,
             # TIME → минуты от полуночи (фронт форматирует в AM/PM). None если не задано.
             "start_min": _time_to_min(r["start_time"]),
             "end_min": _time_to_min(r["end_time"]),
-            # owner-only API → деньги показываем владельцу; только для count_money работников.
-            "money": calc.money(hours) if count_money else None,
+            "money": calc.money(hours),  # деньги считаем всегда (count_money убран)
         })
     return result

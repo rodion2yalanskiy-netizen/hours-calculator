@@ -55,12 +55,16 @@ async def require_auth(authorization: str = Header(default="")) -> CurrentUser:
         raise HTTPException(status_code=401, detail="invalid token payload")
 
     row = await db.fetchrow(
-        "SELECT id, email, full_name, role, worker_id, hourly_rate, is_active "
+        "SELECT id, email, full_name, role, worker_id, hourly_rate, is_active, token_version "
         "FROM users WHERE id=$1::uuid",
         uid,
     )
     if row is None or not row["is_active"]:
         raise HTTPException(status_code=401, detail="user not found or inactive")
+
+    # Отзыв сессий: токен с устаревшей версией (после смены пароля) недействителен.
+    if payload.get("tv") != row["token_version"]:
+        raise HTTPException(status_code=401, detail="token has been revoked")
 
     return CurrentUser(
         id=OWNER_ID,

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from deps import require_auth
 from auth import router as auth_router
 from db import run_migrations
-from config import CORS_ORIGIN
+from config import CORS_ORIGIN, JWT_SECRET
 import calc
 import db
 
@@ -40,6 +40,10 @@ def _time_to_min(t: time | None) -> int | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail-fast: без стойкого JWT_SECRET не стартуем (иначе токены подписывались бы
+    # пустым/слабым ключом и подделывались). openssl rand -hex 32 → 64 символа.
+    if not JWT_SECRET or len(JWT_SECRET) < 32:
+        raise RuntimeError("JWT_SECRET must be set and at least 32 characters long")
     # Единственный владелец схемы: применяем миграцию + сиды на старте (идемпотентно, под lock).
     await run_migrations()
     yield

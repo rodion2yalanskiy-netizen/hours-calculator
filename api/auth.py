@@ -14,6 +14,11 @@ from deps import require_auth, CurrentUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# Фиксированный «пустой» хэш: прогоняем bcrypt даже когда пользователя нет/он
+# неактивен, чтобы все ветки логина занимали одинаковое время (против тайминг-
+# атаки / перечисления пользователей по времени ответа).
+_DUMMY_HASH = hash_password("timing-equalizer-not-a-real-password")
+
 
 class LoginBody(BaseModel):
     email: str
@@ -30,18 +35,20 @@ async def login(body: LoginBody):
     """Вход по email+password → {token, user}. 401 при неверных кредах/is_active=false."""
     email = body.email.strip().lower()
     row = await db.fetchrow(
-        "SELECT id, password_hash, full_name, role, hourly_rate, worker_id, is_active "
+        "SELECT id, password_hash, full_name, role, hourly_rate, worker_id, is_active, token_version "
         "FROM users WHERE lower(email)=$1",
         email,
     )
-    if (
-        row is None
-        or not row["is_active"]
-        or not verify_password(body.password, row["password_hash"])
-    ):
+    if row is None or not row["is_active"]:
+        # Прогоняем bcrypt против dummy-хэша — время как в обычной ветке (без утечки).
+        verify_password(body.password, _DUMMY_HASH)
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    if not verify_password(body.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="invalid credentials")
 
-    token = create_access_token(str(row["id"]), row["role"], row["worker_id"])
+    token = create_access_token(
+        str(row["id"]), row["role"], row["worker_id"], row["token_version"]
+    )
     return {
         "token": token,
         "user": {
@@ -87,8 +94,10 @@ async def change_password(
     if row is None or not verify_password(body.old_password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="old password is incorrect")
 
+    # token_version += 1 → все ранее выданные токены становятся недействительными.
     await db.execute(
-        "UPDATE users SET password_hash=$1, updated_at=now() WHERE id=$2::uuid",
+        "UPDATE users SET password_hash=$1, token_version=token_version+1, updated_at=now() "
+        "WHERE id=$2::uuid",
         hash_password(new), current.user_id,
     )
     return {"ok": True}

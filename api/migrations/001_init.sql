@@ -124,9 +124,12 @@ CREATE TABLE IF NOT EXISTS users (
     worker_id     bigint REFERENCES workers (id),   -- workers.id = bigserial (bigint)
     hourly_rate   numeric(6,2) NOT NULL,
     is_active     boolean NOT NULL DEFAULT true,
+    token_version int NOT NULL DEFAULT 0,            -- отзыв JWT: смена пароля инкрементит
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
+-- На случай, если таблица users уже была создана прежним деплоем без token_version:
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version int NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_users_worker_id ON users (worker_id);
 
 -- ── shifts: фиксация ставки на момент смены (snapshot) ────────────────────────

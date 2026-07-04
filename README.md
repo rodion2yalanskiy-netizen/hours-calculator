@@ -99,6 +99,54 @@ curl -s -o /dev/null -w '%{http_code}\n' "$API/shifts?year=2026&month=6"   # 401
 curl -s "$API/shifts?year=2026&month=6" -H "Authorization: Bearer $TOKEN"   # 200
 ```
 
+## Эндпоинты (Слой 3 — ролевая модель)
+
+Все требуют `Authorization: Bearer <token>`. `supervisor` видит/ведёт всю команду, `worker` — только себя.
+
+| Метод | Путь | Роль | Назначение |
+|---|---|---|---|
+| GET | `/workers` | обе | supervisor — вся команда; worker — только он сам |
+| POST | `/workers` | supervisor | низкоуровневое создание строки `workers` (без user) |
+| PATCH | `/workers/{id}` | supervisor | правка своего работника |
+| POST | `/shifts` | обе | worker пишет только за себя; ставка → `hourly_rate_snapshot` |
+| GET | `/shifts?year=&month=[&worker_id=]` | обе | worker — свои; supervisor — команда (опц. фильтр) |
+| GET | `/team` | supervisor | список членов команды (user-данные) |
+| POST | `/team` | supervisor | завести работника: `workers` + `users` разом |
+| PATCH | `/team/{user_id}` | supervisor | имя / ставка / активность / пароль |
+| GET | `/payouts[?worker_id=&from=&to=]` | обе | недельные выплаты (worker — свои) |
+| POST | `/payouts` | обе | внести выплату за неделю (свою) |
+| PATCH/DELETE | `/payouts/{id}` | обе | правка/удаление своей выплаты |
+| GET | `/summary/weekly?week_start=[&worker_id=]` | обе | сводка за неделю |
+| GET | `/summary/period?from=&to=[&worker_id=]` | обе | сводка по неделям (supervisor без worker_id — вся команда) |
+
+**Бонус/долг/штраф:** `earned_by_hours` = Σ(часы × `hourly_rate_snapshot`) за неделю. Если `amount_paid > earned` → `bonus`; если меньше → `shortfall` + обязательный `shortfall_reason` (`debt`/`fine`; для `fine` обязателен `shortfall_note`).
+
+### Примеры (curl)
+
+Supervisor заводит работника → тот логинится:
+```bash
+curl -s -X POST "$API/team" -H "Authorization: Bearer $SUP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"denis@example.com","password":"denis1234","full_name":"Денис","hourly_rate":24.00}'
+# → {"user_id":"...","worker_id":5,"email":"denis@example.com","full_name":"Денис","hourly_rate":24.0}
+curl -s -X POST "$API/auth/login" -H 'Content-Type: application/json' \
+  -d '{"email":"denis@example.com","password":"denis1234"}'   # → токен worker'а
+```
+
+Worker вносит смену (ставка проставится автоматически) и выплату за неделю:
+```bash
+curl -s -X POST "$API/shifts" -H "Authorization: Bearer $W_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"worker_id":0,"date":"2026-06-15","object_name":"Oak St","start_min":480,"end_min":1020,"hours":8.5,"lunch_deducted":true}'
+curl -s -X POST "$API/payouts" -H "Authorization: Bearer $W_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"week_start":"2026-06-15","week_end":"2026-06-21","amount_paid":250}'   # bonus если > earned
+```
+
+Сводка за неделю:
+```bash
+curl -s "$API/summary/weekly?week_start=2026-06-15" -H "Authorization: Bearer $W_TOKEN"
+curl -s "$API/summary/period?from=2026-06-01&to=2026-06-28" -H "Authorization: Bearer $SUP_TOKEN"  # вся команда
+```
+
 ## Схема БД
 
 Единственный владелец схемы — **api** (`api/migrations/001_init.sql`, применяется идемпотентно на старте api под advisory-lock). Бот схему не создаёт.
@@ -117,5 +165,6 @@ curl -s "$API/shifts?year=2026&month=6" -H "Authorization: Bearer $TOKEN"   # 20
 
 - **Слой 0:** скелет — `/start` → Mini App → «Привет, Родион ✓ подпись проверена».
 - **Слой 1а:** бригада (`workers`) и смены (`shifts`).
-- **Слой 2 (текущий):** аутентификация JWT + роли supervisor/worker, `hourly_rate_snapshot` в сменах, недельные выплаты (`weekly_payouts`). Эндпоинты переведены с Telegram-id на Bearer-токен.
-- **Слой 3 (дальше):** ролевая фильтрация данных, управление командой (`/users`), CRUD выплат, сводка earned/paid/bonus/debt, перенос долгов между неделями.
+- **Слой 2:** аутентификация JWT + роли supervisor/worker, `hourly_rate_snapshot` в сменах, недельные выплаты (`weekly_payouts`). Эндпоинты переведены с Telegram-id на Bearer-токен.
+- **Слой 3 (текущий):** ролевая фильтрация `/workers` и `/shifts`, управление командой `/team`, CRUD выплат `/payouts`, сводки `/summary/weekly` и `/summary/period` (earned/paid/bonus/долг/штраф). Схема БД не менялась.
+- **Слой 4 (дальше):** фронтенд с логином и экранами (Мои смены / Команда / Выплаты / Сводка), тёмная emerald-палитра.

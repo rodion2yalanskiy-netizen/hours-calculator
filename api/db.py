@@ -42,6 +42,12 @@ async def execute(sql: str, *args):
         return await c.execute(sql, *args)
 
 
+async def fetchval(sql: str, *args):
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        return await c.fetchval(sql, *args)
+
+
 async def run_migrations() -> None:
     """Применить 001_init.sql + засеять бригаду и supervisor'а под advisory-lock."""
     pool = await get_pool()

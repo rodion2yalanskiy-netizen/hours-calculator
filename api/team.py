@@ -5,7 +5,7 @@ POST /team            — создать нового работника: worker
 PATCH /team/{user_id} — изменить члена команды (имя/ставка/активность/пароль)
 """
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 import db
@@ -43,12 +43,17 @@ def _member(row) -> dict:
 
 
 @router.get("")
-async def list_team(current: CurrentUser = Depends(require_supervisor)):
+async def list_team(
+    include_inactive: bool = Query(False),
+    current: CurrentUser = Depends(require_supervisor),
+):
+    # По умолчанию только активные; ?include_inactive=1 — все члены команды (+ флаг is_active).
+    active_clause = "" if include_inactive else "AND u.is_active=true"
     rows = await db.fetch(
         "SELECT u.id AS user_id, u.worker_id, u.email, u.full_name, u.role, "
         "       u.hourly_rate, u.is_active, u.created_at "
         "FROM users u JOIN workers w ON w.id = u.worker_id "
-        "WHERE w.user_id=$1 AND u.is_active=true AND w.active=true "
+        f"WHERE w.user_id=$1 AND w.active=true {active_clause} "
         "ORDER BY (u.role='supervisor') DESC, u.full_name",
         current.id,
     )

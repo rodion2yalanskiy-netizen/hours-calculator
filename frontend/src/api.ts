@@ -125,6 +125,25 @@ export interface WeeklySummary {
   status: 'paid' | 'unpaid' | 'shortfall_debt' | 'shortfall_fine' | 'bonus';
 }
 
+export interface PeriodTotals {
+  total_earned: number;
+  total_paid: number;
+  total_bonus: number;
+  total_shortfall: number;
+}
+export interface WorkerPeriod {
+  worker_id: number;
+  worker_name: string | null;
+  weeks: WeeklySummary[];
+  totals: PeriodTotals;
+}
+export interface PeriodSummary {
+  from: string;
+  to: string;
+  workers: WorkerPeriod[];
+  totals: PeriodTotals;
+}
+
 // ── Аутентификация ────────────────────────────────────────────────────────────
 interface LoginResponse {
   token: string;
@@ -179,9 +198,9 @@ export async function getShifts(year: number, month: number, worker_id?: number)
   return apiFetch<Shift[]>(`/shifts?${q.toString()}`);
 }
 
-// ── Команда (экраны — Layer 4b) ────────────────────────────────────────────────
-export async function getTeam(): Promise<TeamMember[]> {
-  return apiFetch<TeamMember[]>('/team');
+// ── Команда ────────────────────────────────────────────────────────────────────
+export async function getTeam(includeInactive = false): Promise<TeamMember[]> {
+  return apiFetch<TeamMember[]>(`/team${includeInactive ? '?include_inactive=1' : ''}`);
 }
 export async function createTeamMember(body: {
   email: string; password: string; full_name: string; hourly_rate: number;
@@ -224,8 +243,8 @@ export async function getSummaryWeekly(week_start: string, worker_id?: number): 
   if (worker_id != null) q.set('worker_id', String(worker_id));
   return apiFetch<WeeklySummary>(`/summary/weekly?${q.toString()}`);
 }
-export async function getSummaryPeriod(from: string, to: string, worker_id?: number): Promise<unknown> {
+export async function getSummaryPeriod(from: string, to: string, worker_id?: number): Promise<PeriodSummary> {
   const q = new URLSearchParams({ from, to });
   if (worker_id != null) q.set('worker_id', String(worker_id));
-  return apiFetch<unknown>(`/summary/period?${q.toString()}`);
+  return apiFetch<PeriodSummary>(`/summary/period?${q.toString()}`);
 }

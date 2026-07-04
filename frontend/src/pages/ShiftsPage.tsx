@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import {
-  getShifts, previewShift, createShift,
+  getShifts, previewShift, createShift, getTeam,
   type Shift, type PreviewResult, type RoundResult,
 } from '../api';
 import { hhmmToMinutes, fmtMoney, fmtHours, fmtCardDate, fmtRangeAmPm } from '../format';
@@ -81,8 +82,25 @@ function branchHoursLabel(r: RoundResult): string {
 
 export default function ShiftsPage() {
   const { user } = useAuth();
-  const workerId = user?.worker_id ?? undefined;
-  const rate = user?.hourly_rate ?? 0;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryWid = searchParams.get('worker_id');
+  // supervisor может смотреть/писать смены конкретного работника через ?worker_id=X
+  const supervisorView = user?.role === 'supervisor' && queryWid != null;
+  const workerId = supervisorView ? Number(queryWid) : (user?.worker_id ?? undefined);
+  const [viewWorker, setViewWorker] = useState<{ name: string; rate: number } | null>(null);
+  const rate = supervisorView ? (viewWorker?.rate ?? user?.hourly_rate ?? 0) : (user?.hourly_rate ?? 0);
+
+  useEffect(() => {
+    if (!supervisorView) { setViewWorker(null); return; }
+    let cancelled = false;
+    getTeam(true)
+      .then((list) => {
+        const m = list.find((x) => String(x.worker_id) === queryWid);
+        if (!cancelled) setViewWorker(m ? { name: m.full_name, rate: m.hourly_rate } : null);
+      })
+      .catch(() => { if (!cancelled) setViewWorker(null); });
+    return () => { cancelled = true; };
+  }, [supervisorView, queryWid]);
 
   const today = useMemo(() => new Date(), []);
   const [mode, setMode] = useState<Mode>('month');
@@ -195,7 +213,16 @@ export default function ShiftsPage() {
 
   return (
     <div className="relative">
-      <h1 className="text-2xl font-bold mb-4">Мои смены</h1>
+      {supervisorView ? (
+        <div className="flex items-center justify-between gap-2 mb-4">
+          <h1 className="text-2xl font-bold truncate">Смены: {viewWorker?.name ?? '…'}</h1>
+          <button onClick={() => setSearchParams({})} className="shrink-0 text-text-muted text-sm hover:text-text">
+            × показать все
+          </button>
+        </div>
+      ) : (
+        <h1 className="text-2xl font-bold mb-4">Мои смены</h1>
+      )}
 
       {/* Переключатель Месяц/Неделя */}
       <div className="grid grid-cols-2 gap-1 bg-bg-2 border border-border rounded-2xl p-1 mb-3">

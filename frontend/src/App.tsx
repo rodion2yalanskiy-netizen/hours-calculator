@@ -4,6 +4,8 @@ import AppShell from './components/AppShell';
 import LoginPage from './pages/LoginPage';
 import ShiftsPage from './pages/ShiftsPage';
 import ProfilePage from './pages/ProfilePage';
+import TeamPage from './pages/TeamPage';
+import TeamMemberPage from './pages/TeamMemberPage';
 import PlaceholderPage from './pages/PlaceholderPage';
 
 export default function App() {
@@ -20,7 +22,8 @@ export default function App() {
           <Route path="/summary" element={<PlaceholderPage title="Сводка" layer="Layer 4d" />} />
           {/* Команда — только supervisor */}
           <Route element={<ProtectedRoute requireRole="supervisor" />}>
-            <Route path="/team" element={<PlaceholderPage title="Команда" layer="Layer 4b" />} />
+            <Route path="/team" element={<TeamPage />} />
+            <Route path="/team/:userId" element={<TeamMemberPage />} />
           </Route>
         </Route>
       </Route>

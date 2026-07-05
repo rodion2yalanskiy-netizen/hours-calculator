@@ -7,7 +7,7 @@ import ProfilePage from './pages/ProfilePage';
 import TeamPage from './pages/TeamPage';
 import TeamMemberPage from './pages/TeamMemberPage';
 import PayoutsPage from './pages/PayoutsPage';
-import PlaceholderPage from './pages/PlaceholderPage';
+import SummaryPage from './pages/SummaryPage';
 
 export default function App() {
   return (
@@ -20,7 +20,7 @@ export default function App() {
           <Route path="/shifts" element={<ShiftsPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/payouts" element={<PayoutsPage />} />
-          <Route path="/summary" element={<PlaceholderPage title="Сводка" layer="Layer 4d" />} />
+          <Route path="/summary" element={<SummaryPage />} />
           {/* Команда — только supervisor */}
           <Route element={<ProtectedRoute requireRole="supervisor" />}>
             <Route path="/team" element={<TeamPage />} />

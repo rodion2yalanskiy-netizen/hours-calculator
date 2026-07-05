@@ -183,6 +183,10 @@ export async function me(): Promise<User> {
   return apiFetch<User>('/auth/me');
 }
 
+export async function updateProfile(body: { full_name?: string; hourly_rate?: number }): Promise<User> {
+  return apiFetch<User>('/auth/me', { method: 'PATCH', body: JSON.stringify(body) });
+}
+
 export async function changePassword(old_password: string, new_password: string): Promise<void> {
   await apiFetch<{ ok: boolean }>('/auth/change-password', {
     method: 'POST',

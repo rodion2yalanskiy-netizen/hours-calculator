@@ -186,6 +186,13 @@ export default function ShiftsPage() {
     setShowForm(true);
   };
 
+  // Deep-link из push: ?new=1 → сразу форма новой смены; ?mode=week → режим Недели.
+  useEffect(() => {
+    if (searchParams.get('mode') === 'week') setMode('week');
+    if (searchParams.get('new') === '1') openCreate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onDelete = async (s: Shift) => {
     if (!window.confirm(`Точно удалить смену за ${fmtCardDate(s.date)}?`)) return;
     try {
@@ -404,7 +411,7 @@ export default function ShiftsPage() {
         <label className="block">
           <span className="text-text-3 text-xs">Дата</span>
           <input type="date" value={fDate} onChange={(e) => setFDate(e.target.value)}
-            className="mt-1 w-full bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent text-center" />
+            className="mt-1 w-full min-w-0 max-w-full bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent text-center" />
         </label>
 
         <label className="block">
@@ -417,10 +424,10 @@ export default function ShiftsPage() {
           <span className="text-text-3 text-xs">Время</span>
           <div className="mt-1 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
             <input type="time" value={fStart} onChange={(e) => setFStart(e.target.value)}
-              className="bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent" />
+              className="w-full min-w-0 bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent" />
             <span className="text-text-muted">—</span>
             <input type="time" value={fEnd} onChange={(e) => setFEnd(e.target.value)}
-              className="bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent" />
+              className="w-full min-w-0 bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent" />
           </div>
         </div>
 

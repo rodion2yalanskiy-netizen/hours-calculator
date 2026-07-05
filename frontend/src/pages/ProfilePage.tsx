@@ -1,42 +1,104 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { changePassword } from '../api';
+import { changePassword, updateProfile } from '../api';
 
 export default function ProfilePage() {
-  const { user, logout } = useAuth();
-  const [open, setOpen] = useState(false);
+  const { user, logout, updateUser } = useAuth();
+  const [name, setName] = useState('');
+  const [rate, setRate] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [pwOpen, setPwOpen] = useState(false);
+
+  useEffect(() => {
+    if (user) { setName(user.full_name); setRate(String(user.hourly_rate)); }
+  }, [user]);
 
   if (!user) return null;
-  const roleLabel = user.role === 'supervisor' ? 'Супервайзер' : 'Работник';
+  const isSup = user.role === 'supervisor';
+  const roleLabel = isSup ? 'Супервайзер' : 'Работник';
+  const rateNum = parseFloat(rate);
+  const nameChanged = name.trim() !== user.full_name;
+  const rateChanged = isSup && Number.isFinite(rateNum) && rateNum !== user.hourly_rate;
+  const changed = nameChanged || rateChanged;
+
+  const showToast = (m: string) => { setToast(m); window.setTimeout(() => setToast(null), 2000); };
+
+  const save = async () => {
+    setBusy(true); setError(null);
+    const body: { full_name?: string; hourly_rate?: number } = {};
+    if (nameChanged) {
+      if (name.trim().length < 2) { setError('Имя — минимум 2 символа'); setBusy(false); return; }
+      body.full_name = name.trim();
+    }
+    if (rateChanged) {
+      if (rateNum <= 0) { setError('Ставка должна быть больше 0'); setBusy(false); return; }
+      body.hourly_rate = rateNum;
+    }
+    try {
+      const updated = await updateProfile(body);
+      updateUser(updated);  // обновляем шапку AppShell и т.д.
+      showToast('Сохранено');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось сохранить');
+    } finally { setBusy(false); }
+  };
+
+  const inputCls = 'mt-1 w-full min-w-0 bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent';
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-5">Профиль</h1>
+    <div className="relative">
+      <h1 className="text-2xl font-bold mb-5 leading-tight">Профиль</h1>
 
       <div className="bg-bg-2 border border-border rounded-2xl p-5 space-y-4">
-        <Field label="Имя" value={user.full_name} />
-        <Field label="Email" value={user.email} />
-        <Field label="Роль" value={roleLabel} />
-        <Field label="Ставка" value={`$${user.hourly_rate}/час`} />
+        <label className="block">
+          <span className="text-text-3 text-xs">Имя</span>
+          <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+        </label>
+
+        <div>
+          <span className="text-text-3 text-xs">Email</span>
+          <p className="mt-1 font-medium break-all">{user.email}</p>
+        </div>
+
+        <div>
+          <span className="text-text-3 text-xs">Роль</span>
+          <p className="mt-1 font-medium">{roleLabel}</p>
+        </div>
+
+        <div>
+          <span className="text-text-3 text-xs">Ставка, $/час</span>
+          {isSup ? (
+            <input type="number" step="0.01" min="0" value={rate} onChange={(e) => setRate(e.target.value)} className={inputCls} />
+          ) : (
+            <p className="mt-1 font-medium flex items-center gap-2">
+              ${user.hourly_rate}/час
+              <span className="text-text-muted text-xs">🔒 меняется старшим</span>
+            </p>
+          )}
+        </div>
+
+        {error && <p className="text-danger text-sm">{error}</p>}
+
+        <button onClick={save} disabled={!changed || busy}
+          className={`w-full rounded-2xl py-3 font-semibold ${!changed || busy ? 'bg-bg-3 text-text-muted' : 'bg-accent text-bg-2 hover:bg-accent-2'}`}>
+          {busy ? 'Сохранение…' : 'Сохранить'}
+        </button>
       </div>
 
-      <button
-        onClick={() => setOpen(true)}
-        className="w-full mt-5 rounded-2xl py-3.5 font-semibold bg-bg-2 border border-border-2 hover:border-accent"
-      >
+      <button onClick={() => setPwOpen(true)}
+        className="w-full mt-4 rounded-2xl py-3.5 font-semibold bg-bg-2 border border-border-2 hover:border-accent">
         Сменить пароль
       </button>
 
-      {open && <ChangePasswordModal onClose={() => setOpen(false)} onDone={logout} />}
-    </div>
-  );
-}
+      {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} onDone={logout} />}
 
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between border-b border-border last:border-0 pb-3 last:pb-0">
-      <span className="text-text-muted text-sm">{label}</span>
-      <span className="font-medium text-right">{value}</span>
+      {toast && (
+        <div className="fixed bottom-24 inset-x-0 flex justify-center pointer-events-none z-30">
+          <div className="bg-bg-2 text-success text-sm font-medium px-4 py-2 rounded-full shadow-lg border border-border">{toast}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -48,7 +110,6 @@ function ChangePasswordModal({ onClose, onDone }: { onClose: () => void; onDone:
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
 
-  // После успеха токен инвалидирован (bump token_version) → разлогиниваем.
   useEffect(() => {
     if (!done) return;
     const t = window.setTimeout(onDone, 1600);
@@ -59,16 +120,10 @@ function ChangePasswordModal({ onClose, onDone }: { onClose: () => void; onDone:
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    setError(null);
-    setBusy(true);
-    try {
-      await changePassword(oldPw, newPw);
-      setDone(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось сменить пароль');
-    } finally {
-      setBusy(false);
-    }
+    setError(null); setBusy(true);
+    try { await changePassword(oldPw, newPw); setDone(true); }
+    catch (err) { setError(err instanceof Error ? err.message : 'Не удалось сменить пароль'); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -86,17 +141,15 @@ function ChangePasswordModal({ onClose, onDone }: { onClose: () => void; onDone:
             <label className="block">
               <span className="text-text-3 text-xs">Текущий пароль</span>
               <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password"
-                className="mt-1 w-full bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent" />
+                className="mt-1 w-full min-w-0 bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent" />
             </label>
             <label className="block">
               <span className="text-text-3 text-xs">Новый пароль</span>
               <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password"
-                className="mt-1 w-full bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent" />
+                className="mt-1 w-full min-w-0 bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent" />
               <span className="text-text-muted text-xs">Минимум 8 символов, буквы и цифры</span>
             </label>
-
             {error && <p className="text-danger text-sm">{error}</p>}
-
             <div className="flex gap-3 pt-1">
               <button type="button" onClick={onClose} className="flex-1 rounded-xl py-3 bg-bg-3 text-text-muted">Отмена</button>
               <button type="submit" disabled={busy || !oldPw || !valid}

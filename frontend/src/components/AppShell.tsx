@@ -25,8 +25,9 @@ export default function AppShell() {
 
   return (
     <div className="min-h-screen bg-bg text-text">
-      {/* Верхняя панель */}
-      <header className="sticky top-0 z-20 bg-bg/85 backdrop-blur border-b border-border">
+      {/* Верхняя панель (учитываем safe-area сверху для iPhone-notch в PWA) */}
+      <header className="sticky top-0 z-20 bg-bg/85 backdrop-blur border-b border-border"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}>
         <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-between">
           <NavLink to="/shifts" className="flex items-center gap-2 font-bold tracking-wide">
             <span className="w-2.5 h-2.5 rounded-full bg-accent shadow-[0_0_12px_#34D399]" />
@@ -98,13 +99,14 @@ export default function AppShell() {
         </aside>
 
         {/* Контент */}
-        <main className="flex-1 w-full max-w-md mx-auto px-4 pt-5 pb-28 md:pb-8">
+        <main className="flex-1 w-full max-w-md mx-auto px-4 pt-6 pb-28 md:pb-8">
           <Outlet />
         </main>
       </div>
 
       {/* Нижняя навигация (мобильно) */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-20 bg-bg-2 border-t border-border">
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-20 bg-bg-2 border-t border-border"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
         <div
           className="max-w-md mx-auto grid"
           style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}

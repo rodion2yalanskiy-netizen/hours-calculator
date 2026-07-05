@@ -1,4 +1,4 @@
-// Web Push: регистрация SW, запрос разрешения, подписка/отписка (Слой 7b).
+// Web Push: регистрация SW, запрос разрешения, подписка/отписка (Слой 7b/7c).
 import { getVapidPublicKey, subscribeToPush, unsubscribeFromPush as apiUnsubscribe } from '../api';
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -19,14 +19,19 @@ export function getPushPermissionStatus(): 'granted' | 'denied' | 'default' {
   return Notification.permission;
 }
 
-/** iOS Safari и приложение НЕ добавлено на главный экран → нужна установка для push. */
-export function isIOSNeedingInstall(): boolean {
-  const ua = navigator.userAgent || '';
-  const isIOS = /iPad|iPhone|iPod/.test(ua)
+export function isIOS(): boolean {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+export function isStandalone(): boolean {
   const nav = navigator as Navigator & { standalone?: boolean };
-  const standalone = nav.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
-  return isIOS && !standalone;
+  return nav.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+}
+
+/** iOS Safari и приложение НЕ добавлено на «Экран Домой» → нужна PWA-установка для push. */
+export function isIOSNeedingInstall(): boolean {
+  return isIOS() && !isStandalone();
 }
 
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
@@ -43,26 +48,47 @@ export async function hasActiveSubscription(): Promise<boolean> {
   return !!(await reg.pushManager.getSubscription());
 }
 
-/** Запросить разрешение и подписаться. Возвращает true при успехе. */
-export async function requestPermissionAndSubscribe(): Promise<boolean> {
-  if (!isPushSupportedInBrowser()) return false;
+export type SubscribeResult =
+  | { ok: true }
+  | { ok: false; reason: 'no_push_api'; ios_pwa_needed: boolean }
+  | { ok: false; reason: 'permission_denied' }
+  | { ok: false; reason: 'sw_registration_failed'; details: string }
+  | { ok: false; reason: 'server_error'; details: string }
+  | { ok: false; reason: 'no_vapid_key' };
+
+/** Запросить разрешение и подписаться. Возвращает конкретную причину при неудаче. */
+export async function requestPermissionAndSubscribe(): Promise<SubscribeResult> {
+  if (!('PushManager' in window) || !('serviceWorker' in navigator) || !('Notification' in window)) {
+    return { ok: false, reason: 'no_push_api', ios_pwa_needed: isIOS() && !isStandalone() };
+  }
   const reg = await registerServiceWorker();
-  if (!reg) return false;
-  const perm = await Notification.requestPermission();
-  if (perm !== 'granted') return false;
-  const key = await getVapidPublicKey();
-  if (!key) return false;
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: urlBase64ToUint8Array(key) as BufferSource,
-  });
-  const json = sub.toJSON();
-  await subscribeToPush({
-    endpoint: sub.endpoint,
-    keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
-    user_agent: navigator.userAgent,
-  });
-  return true;
+  if (!reg) return { ok: false, reason: 'sw_registration_failed', details: 'service worker registration failed' };
+
+  let perm: NotificationPermission;
+  try { perm = await Notification.requestPermission(); }
+  catch { return { ok: false, reason: 'permission_denied' }; }
+  if (perm !== 'granted') return { ok: false, reason: 'permission_denied' };
+
+  let key: string;
+  try { key = await getVapidPublicKey(); }
+  catch (e) { return { ok: false, reason: 'server_error', details: e instanceof Error ? e.message : 'network error' }; }
+  if (!key) return { ok: false, reason: 'no_vapid_key' };
+
+  try {
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(key) as BufferSource,
+    });
+    const json = sub.toJSON();
+    await subscribeToPush({
+      endpoint: sub.endpoint,
+      keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
+      user_agent: navigator.userAgent,
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: 'server_error', details: e instanceof Error ? e.message : 'subscribe failed' };
+  }
 }
 
 /** Отписаться в браузере и на сервере. */

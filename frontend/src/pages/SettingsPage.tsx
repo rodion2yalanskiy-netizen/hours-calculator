@@ -2,10 +2,20 @@ import { useEffect, useState } from 'react';
 import { getSettings, updateSettings } from '../api';
 import {
   isPushSupportedInBrowser, isIOSNeedingInstall, hasActiveSubscription,
-  requestPermissionAndSubscribe, unsubscribeFromPush, getPushPermissionStatus,
+  requestPermissionAndSubscribe, unsubscribeFromPush,
 } from '../lib/push';
 
 type PushSupport = 'loading' | 'ok' | 'unsupported' | 'ios-install';
+
+const IOS_STEPS = [
+  'Откройте это приложение в Safari (не в Chrome!)',
+  'Нажмите кнопку «Поделиться» ⬆️ внизу экрана',
+  'Прокрутите вниз и выберите «На экран „Домой“»',
+  'Нажмите «Добавить» в правом верхнем углу',
+  'Закройте Safari',
+  'Откройте приложение с иконки на главном экране',
+  'Зайдите в Настройки → Уведомления → включите',
+];
 
 export default function SettingsPage() {
   const [phone, setPhone] = useState('');
@@ -19,6 +29,7 @@ export default function SettingsPage() {
   const [pushOn, setPushOn] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushMsg, setPushMsg] = useState<string | null>(null);
+  const [pushDetails, setPushDetails] = useState<string | null>(null);
 
   useEffect(() => {
     getSettings()
@@ -28,7 +39,7 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    if (!isPushSupportedInBrowser()) { setPushSupport('unsupported'); return; }
+    if (!isPushSupportedInBrowser()) { setPushSupport(isIOSNeedingInstall() ? 'ios-install' : 'unsupported'); return; }
     if (isIOSNeedingInstall()) { setPushSupport('ios-install'); return; }
     setPushSupport('ok');
     hasActiveSubscription().then(setPushOn).catch(() => setPushOn(false));
@@ -49,27 +60,42 @@ export default function SettingsPage() {
   };
 
   const enablePush = async () => {
-    setPushBusy(true); setPushMsg(null);
+    setPushBusy(true); setPushMsg(null); setPushDetails(null);
     try {
-      const ok = await requestPermissionAndSubscribe();
-      if (ok) { setPushOn(true); setPushMsg(null); }
-      else setPushMsg(getPushPermissionStatus() === 'denied'
-        ? 'Браузер заблокировал уведомления. Разрешите их в настройках браузера.'
-        : 'Не удалось включить уведомления.');
-    } catch {
-      setPushMsg('Не удалось включить уведомления.');
+      const res = await requestPermissionAndSubscribe();
+      if (res.ok) { setPushOn(true); return; }
+      switch (res.reason) {
+        case 'no_push_api':
+          if (res.ios_pwa_needed) { setPushSupport('ios-install'); }
+          else { setPushMsg('Этот браузер не поддерживает push-уведомления.'); }
+          break;
+        case 'permission_denied':
+          setPushMsg('Уведомления заблокированы в браузере. Откройте настройки Safari/Chrome → Уведомления → разрешите для этого сайта.');
+          break;
+        case 'sw_registration_failed':
+          setPushMsg('Не удалось зарегистрировать фоновый сервис. Обновите страницу и попробуйте снова.');
+          setPushDetails(res.details);
+          break;
+        case 'server_error':
+          setPushMsg('Не удалось подключиться к серверу. Попробуйте позже.');
+          setPushDetails(res.details);
+          break;
+        case 'no_vapid_key':
+          setPushMsg('Сервис уведомлений временно не работает. Скажите старшему.');
+          break;
+      }
     } finally { setPushBusy(false); }
   };
 
   const disablePush = async () => {
-    setPushBusy(true); setPushMsg(null);
+    setPushBusy(true); setPushMsg(null); setPushDetails(null);
     try { await unsubscribeFromPush(); setPushOn(false); }
     finally { setPushBusy(false); }
   };
 
   return (
     <div className="relative">
-      <h1 className="text-2xl font-bold mb-5">Настройки</h1>
+      <h1 className="text-2xl font-bold mb-5 leading-tight">Настройки</h1>
 
       {/* Босс */}
       <div className="bg-bg-2 border border-border rounded-2xl p-5 mb-4">
@@ -78,7 +104,7 @@ export default function SettingsPage() {
           <span className="text-text-3 text-xs">Номер телефона босса</span>
           <input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
             disabled={loading} placeholder="+1 (360) 555-1234"
-            className="mt-1 w-full bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent" />
+            className="mt-1 w-full min-w-0 bg-bg-3 border border-border-2 rounded-xl px-4 py-3 outline-none focus:border-accent" />
           <span className="text-text-muted text-xs">Один на всю команду. Нужен для отправки отчётов боссу.</span>
         </label>
         {error && <p className="text-danger text-sm mt-3">{error}</p>}
@@ -97,19 +123,23 @@ export default function SettingsPage() {
         )}
 
         {pushSupport === 'ios-install' && (
-          <div className="text-sm text-text-2 space-y-1">
-            <p className="font-medium mb-1">Для напоминаний на iPhone:</p>
-            <p>1. Нажмите «Поделиться» в Safari</p>
-            <p>2. Выберите «На экран „Домой“»</p>
-            <p>3. Откройте приложение с главного экрана</p>
-            <p>4. Вернитесь сюда и включите уведомления</p>
+          <div>
+            <p className="text-sm font-medium mb-3">📱 Для получения уведомлений на iPhone:</p>
+            <ol className="space-y-2">
+              {IOS_STEPS.map((step, i) => (
+                <li key={i} className="flex items-start gap-3 text-sm text-text-2">
+                  <span className="shrink-0 w-6 h-6 rounded-lg bg-accent-dim text-accent flex items-center justify-center text-xs font-bold">{i + 1}</span>
+                  <span className="min-w-0">{step}</span>
+                </li>
+              ))}
+            </ol>
           </div>
         )}
 
         {pushSupport === 'ok' && (
           <>
             <div className="flex items-center justify-between gap-3">
-              <span className="text-sm">Напоминания о недельном отчёте: <span className={pushOn ? 'text-accent font-medium' : 'text-text-muted'}>{pushOn ? 'Включены' : 'Выключены'}</span></span>
+              <span className="text-sm min-w-0">Напоминания: <span className={pushOn ? 'text-accent font-medium' : 'text-text-muted'}>{pushOn ? 'Включены' : 'Выключены'}</span></span>
               {pushOn ? (
                 <button onClick={disablePush} disabled={pushBusy} className="shrink-0 rounded-xl px-4 py-2 bg-bg-3 border border-border-2 text-sm">
                   {pushBusy ? '…' : 'Выключить'}
@@ -121,7 +151,8 @@ export default function SettingsPage() {
               )}
             </div>
             {pushMsg && <p className="text-warning text-sm mt-2">{pushMsg}</p>}
-            <p className="text-text-muted text-xs mt-3">Приходят по субботам в 19:00, 20:00, 21:00 и 22:00, если вы не отправили отчёт боссу.</p>
+            {pushDetails && <p className="text-text-muted text-xs mt-1 break-all">{pushDetails}</p>}
+            <p className="text-text-muted text-xs mt-3">Дневные напоминания «внеси смену» и субботние «отправь отчёт» приходят в 19:00–22:00, если вы ещё не внесли/не отправили.</p>
           </>
         )}
       </div>

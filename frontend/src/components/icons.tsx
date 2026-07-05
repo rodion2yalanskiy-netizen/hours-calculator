@@ -43,3 +43,15 @@ export const IconUser = ({ className }: IconProps) => (
 export const IconLogout = ({ className }: IconProps) => (
   <svg {...base(className)}><path d="M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" /></svg>
 );
+export const IconCheckCircle = ({ className }: IconProps) => (
+  <svg {...base(className)}><circle cx="12" cy="12" r="9" /><path d="M8.5 12.5l2.5 2.5 4.5-5" /></svg>
+);
+export const IconAlertTriangle = ({ className }: IconProps) => (
+  <svg {...base(className)}><path d="M12 4l9 16H3z" /><path d="M12 10v4M12 17.5v.5" /></svg>
+);
+export const IconCoins = ({ className }: IconProps) => (
+  <svg {...base(className)}><ellipse cx="9" cy="7" rx="5" ry="2.5" /><path d="M4 7v5c0 1.4 2.2 2.5 5 2.5" /><ellipse cx="15" cy="14" rx="5" ry="2.5" /><path d="M10 14.5V17c0 1.4 2.2 2.5 5 2.5s5-1.1 5-2.5v-3" /></svg>
+);
+export const IconPlus = ({ className }: IconProps) => (
+  <svg {...base(className)}><path d="M12 5v14M5 12h14" /></svg>
+);

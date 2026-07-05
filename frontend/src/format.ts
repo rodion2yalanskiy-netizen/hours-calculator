@@ -23,9 +23,18 @@ export function moneyFloor(x: number): number {
   return Math.floor(x);
 }
 
-/** "$262", "$1,234" — доллары, без центов. */
+/** "$262", "$1,234" — доллары, без центов (для смен/заработка). */
 export function fmtMoney(x: number): string {
   return '$' + moneyFloor(x).toLocaleString('en-US');
+}
+
+/** "$1,200", "$1,147.50" — центы показываем только если они есть (для выплат). */
+export function fmtUSD(x: number): string {
+  const hasCents = Math.round(x * 100) % 100 !== 0;
+  return '$' + x.toLocaleString('en-US', {
+    minimumFractionDigits: hasCents ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
 }
 
 /** Целое → "9 ч"; половина → "10,5 ч" (запятая). */

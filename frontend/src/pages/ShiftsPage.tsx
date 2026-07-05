@@ -45,13 +45,9 @@ async function copyText(text: string): Promise<void> {
 }
 
 // ── Выбор расчёта ─────────────────────────────────────────────────────────────
-function activeRound(p: PreviewResult | null, lunch: 'with' | 'without' | null): RoundResult | null {
-  if (!p) return null;
-  if (p.needs_lunch_choice) { if (!lunch) return null; return lunch === 'with' ? p.with_lunch : p.without_lunch; }
-  return p.round;
-}
-function branchHoursLabel(r: RoundResult): string {
-  return r.needs_round_choice ? `${fmtHours(r.hours_down)}–${fmtHours(r.hours_up)}` : fmtHours(r.hours);
+// Слой 7e: выбор обеда убран (галочка). Активный вариант округления = preview.round.
+function activeRound(p: PreviewResult | null): RoundResult | null {
+  return p ? p.round : null;
 }
 
 type Mode = 'month' | 'week';
@@ -168,21 +164,21 @@ export default function ShiftsPage() {
   const [fEnd, setFEnd] = useState('');
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
-  const [lunchChoice, setLunchChoice] = useState<'with' | 'without' | null>(null);
+  const [fHasLunch, setFHasLunch] = useState(true); // Слой 7e: галочка обеда (по умолчанию был)
   const [roundChoice, setRoundChoice] = useState<'down' | 'up' | null>(null);
   const [saving, setSaving] = useState(false);
 
   const openCreate = () => {
     setEditId(null);
     setFDate(todayISO()); setFObject(''); setFStart(''); setFEnd('');
-    setPreview(null); setPreviewErr(null); setLunchChoice(null); setRoundChoice(null);
+    setPreview(null); setPreviewErr(null); setFHasLunch(true); setRoundChoice(null);
     setShowForm(true);
   };
   const openEdit = (s: Shift) => {
     setEditId(s.id);
     setFDate(s.date); setFObject(s.object_name);
     setFStart(minToHHMM(s.start_min)); setFEnd(minToHHMM(s.end_min));
-    setPreview(null); setPreviewErr(null); setLunchChoice(null); setRoundChoice(null);
+    setPreview(null); setPreviewErr(null); setFHasLunch(!s.lunch_skipped); setRoundChoice(null);
     setShowForm(true);
   };
 
@@ -210,28 +206,26 @@ export default function ShiftsPage() {
     setPreview(null); setPreviewErr(null);
     if (Number.isNaN(sm) || Number.isNaN(em)) return;
     let cancelled = false;
-    previewShift(sm, em)
+    previewShift(sm, em, fHasLunch)
       .then((p) => { if (!cancelled) setPreview(p); })
       .catch((e: unknown) => { if (!cancelled) setPreviewErr(e instanceof Error ? e.message : 'Ошибка'); });
     return () => { cancelled = true; };
-  }, [fStart, fEnd, showForm]);
+  }, [fStart, fEnd, fHasLunch, showForm]);
 
-  useEffect(() => { setLunchChoice(preview?.needs_lunch_choice ? 'with' : null); }, [preview]);
   useEffect(() => {
-    const r = activeRound(preview, lunchChoice);
+    const r = activeRound(preview);
     setRoundChoice(r?.needs_round_choice ? 'up' : null);
-  }, [preview, lunchChoice]);
+  }, [preview]);
 
-  const final = useMemo((): { hours: number; lunch_deducted: boolean } | null => {
+  const final = useMemo((): { hours: number } | null => {
     if (!preview) return null;
-    const r = activeRound(preview, lunchChoice);
+    const r = activeRound(preview);
     if (!r) return null;
     let hours: number;
     if (!r.needs_round_choice) hours = r.hours;
     else { if (!roundChoice) return null; hours = roundChoice === 'down' ? r.hours_down : r.hours_up; }
-    const lunch_deducted = preview.needs_lunch_choice ? lunchChoice === 'with' : preview.lunch_deducted;
-    return { hours, lunch_deducted };
-  }, [preview, lunchChoice, roundChoice]);
+    return { hours };
+  }, [preview, roundChoice]);
 
   const canSave = !!final && fObject.trim().length > 0 && workerId != null && !saving;
 
@@ -242,7 +236,7 @@ export default function ShiftsPage() {
       const payload = {
         date: fDate, object_name: fObject.trim(),
         start_min: hhmmToMinutes(fStart), end_min: hhmmToMinutes(fEnd),
-        hours: final.hours, lunch_deducted: final.lunch_deducted,
+        hours: final.hours, has_lunch: fHasLunch,
       };
       if (editId != null) { await updateShift(editId, payload); showToast('Смена обновлена'); }
       else {
@@ -433,22 +427,18 @@ export default function ShiftsPage() {
 
         {previewErr && <p className="text-danger text-sm">{previewErr}</p>}
 
-        {preview?.needs_lunch_choice && (
-          <div>
-            <p className="text-text-muted text-xs mb-2">Вычитать обед?</p>
-            <div className="grid grid-cols-2 gap-3">
-              <ChoiceBtn selected={lunchChoice === 'without'} onClick={() => setLunchChoice('without')} title="Нет, чистые" sub={branchHoursLabel(preview.without_lunch)} />
-              <ChoiceBtn selected={lunchChoice === 'with'} onClick={() => setLunchChoice('with')} title="Да, −30 мин" sub={branchHoursLabel(preview.with_lunch)} />
-            </div>
-          </div>
-        )}
-
-        {preview && !preview.needs_lunch_choice && preview.lunch_deducted && (
-          <div className="bg-accent-dim text-accent rounded-xl px-3 py-2 text-sm">Обед вычтен −30 мин</div>
-        )}
+        {/* Слой 7e: явная галочка обеда (по умолчанию стоит). */}
+        <button type="button" onClick={() => setFHasLunch((v) => !v)}
+          className="w-full flex items-center gap-3 bg-bg-3 border border-border-2 rounded-xl px-4 py-3 text-left">
+          <span className={`shrink-0 w-6 h-6 rounded-lg border-2 flex items-center justify-center ${fHasLunch ? 'bg-accent border-accent text-bg-2' : 'border-border-2 text-transparent'}`}>✓</span>
+          <span>
+            <span className="font-medium">Был обед</span>
+            <span className="text-text-muted text-sm"> (−30 мин)</span>
+          </span>
+        </button>
 
         {(() => {
-          const r = activeRound(preview, lunchChoice);
+          const r = activeRound(preview);
           if (!r || !r.needs_round_choice) return null;
           return (
             <div>
@@ -495,6 +485,11 @@ function ShiftCard({ s, onCopy, onEdit, onDelete }: {
           </div>
           {s.start_min != null && s.end_min != null && (
             <div className="text-text-3 text-sm mt-1">{fmtRangeAmPm(s.start_min, s.end_min)}</div>
+          )}
+          {s.lunch_skipped && (
+            <div className="inline-flex items-center gap-1 mt-1.5 text-warning text-xs bg-warning/10 border border-warning/30 rounded-lg px-2 py-0.5">
+              🍽 без обеда
+            </div>
           )}
         </div>
         <div className="text-right shrink-0 pl-3">

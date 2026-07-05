@@ -67,6 +67,7 @@ export interface Shift {
   money: number;
   start_min: number | null;
   end_min: number | null;
+  lunch_skipped: boolean;
 }
 
 export interface Settings {
@@ -77,9 +78,12 @@ export type RoundResult =
   | { needs_round_choice: false; hours: number }
   | { needs_round_choice: true; hours_down: number; hours_up: number };
 
-export type PreviewResult =
-  | { needs_lunch_choice: true; with_lunch: RoundResult; without_lunch: RoundResult; hourly_rate: number }
-  | { needs_lunch_choice: false; lunch_deducted: boolean; round: RoundResult; hourly_rate: number };
+// Слой 7e: needs_lunch_choice убран (обед — явная галочка); остаётся округление.
+export interface PreviewResult {
+  lunch_deducted: boolean;
+  round: RoundResult;
+  hourly_rate: number;
+}
 
 export interface ShiftCreateBody {
   worker_id: number;
@@ -87,8 +91,9 @@ export interface ShiftCreateBody {
   object_name: string;
   start_min: number;
   end_min: number;
-  hours: number;
-  lunch_deducted: boolean;
+  hours?: number;              // финал при выборе округления (backend посчитает сам иначе)
+  has_lunch: boolean;          // Слой 7e: галочка обеда
+  suppress_notification?: boolean; // supervisor при заносе задним числом
 }
 
 export interface TeamMember {
@@ -199,10 +204,10 @@ export async function getWorkers(): Promise<Worker[]> {
   return apiFetch<Worker[]>('/workers');
 }
 
-export async function previewShift(start_min: number, end_min: number, worker_id?: number): Promise<PreviewResult> {
+export async function previewShift(start_min: number, end_min: number, has_lunch: boolean, worker_id?: number): Promise<PreviewResult> {
   return apiFetch<PreviewResult>('/shifts/preview', {
     method: 'POST',
-    body: JSON.stringify({ start_min, end_min, ...(worker_id != null ? { worker_id } : {}) }),
+    body: JSON.stringify({ start_min, end_min, has_lunch, ...(worker_id != null ? { worker_id } : {}) }),
   });
 }
 
@@ -217,7 +222,7 @@ export async function getShifts(year: number, month: number, worker_id?: number)
 }
 
 export async function updateShift(id: number, body: {
-  date?: string; object_name?: string; start_min?: number; end_min?: number; hours?: number; lunch_deducted?: boolean;
+  date?: string; object_name?: string; start_min?: number; end_min?: number; hours?: number; has_lunch?: boolean;
 }): Promise<Shift> {
   return apiFetch<Shift>(`/shifts/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
 }

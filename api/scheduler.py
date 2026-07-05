@@ -26,21 +26,6 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 _REMINDER_HOURS = {19, 20, 21, 22}
 
 
-async def _send_to_worker(worker_id: int, title: str, body: str, url: str) -> None:
-    """Отправить push всем подпискам работника; мёртвые (410/404) удалить."""
-    subs = await db.fetch(
-        "SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE worker_id=$1", worker_id
-    )
-    for s in subs:
-        sub = {"endpoint": s["endpoint"], "keys": {"p256dh": s["p256dh"], "auth": s["auth"]}}
-        try:
-            await notifier.send_push(sub, title, body, url=url)
-        except notifier.SubscriptionExpired:
-            await db.execute("DELETE FROM push_subscriptions WHERE id=$1", s["id"])
-        except Exception:  # noqa: BLE001 — единичный сбой не рушит рассылку
-            pass
-
-
 async def check_hourly_reminders() -> None:
     try:
         tz = ZoneInfo(SUBSCRIBER_TIMEZONE)
@@ -63,7 +48,7 @@ async def check_hourly_reminders() -> None:
             wid, OWNER_ID, today,
         )
         if not has_today:
-            await _send_to_worker(
+            await notifier.push_to_worker(
                 wid, "Внеси смену", f"Не забудь внести смену за сегодня — {hh}", "/shifts?new=1"
             )
 
@@ -79,7 +64,7 @@ async def check_hourly_reminders() -> None:
                 wid, week_start,
             )
             if has_week and not reported:
-                await _send_to_worker(
+                await notifier.push_to_worker(
                     wid, "Не забудь про отчёт",
                     f"Отправь недельный отчёт боссу — сейчас {hh}", "/shifts?mode=week",
                 )

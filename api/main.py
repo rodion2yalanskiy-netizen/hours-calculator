@@ -7,6 +7,7 @@
 - /summary — сводки заработок/выплата/бонус/долг/штраф.
 hourly_rate_snapshot в смене = реальная ставка работника на момент смены.
 """
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import date as date_cls, time
 
@@ -27,6 +28,7 @@ from db import run_migrations
 from config import CORS_ORIGIN, JWT_SECRET
 import calc
 import logic
+import notifier
 import db
 
 # Полные русские названия дней (date.weekday(): 0=понедельник).
@@ -179,6 +181,7 @@ class PreviewBody(BaseModel):
     start_min: int
     end_min: int
     worker_id: int | None = None
+    has_lunch: bool = True  # Слой 7e: явная галочка обеда
 
 
 class ShiftCreate(BaseModel):
@@ -187,8 +190,17 @@ class ShiftCreate(BaseModel):
     object_name: str
     start_min: int
     end_min: int
-    hours: float
-    lunch_deducted: bool
+    hours: float | None = None       # опц.: фронт присылает финал при выборе округления (15–20 мин)
+    has_lunch: bool = True            # Слой 7e: True → вычесть 30 мин обеда
+    suppress_notification: bool = False  # supervisor при заносе задним числом — не слать push
+
+
+def _resolve_hours(start_min: int, end_min: int, has_lunch: bool, provided: float | None) -> float:
+    """Часы из preview_shift; при выборе округления (15–20 мин) берём provided, иначе округление вверх."""
+    r = calc.preview_shift(start_min, end_min, has_lunch)["round"]
+    if not r["needs_round_choice"]:
+        return float(r["hours"])
+    return float(provided) if provided is not None else float(r["hours_up"])
 
 
 @app.post("/shifts/preview")
@@ -200,9 +212,25 @@ async def shifts_preview(body: PreviewBody, user=Depends(require_auth)):
         rate = await logic.resolve_hourly_rate(body.worker_id, user.id, user.hourly_rate)
     else:
         rate = user.hourly_rate
-    res = calc.preview_shift(body.start_min, body.end_min)
+    res = calc.preview_shift(body.start_min, body.end_min, body.has_lunch)
     res["hourly_rate"] = float(rate)
     return res
+
+
+async def _notify_lunch_skipped(tenant: int, worker_name: str, worker_id: int, d, object_name: str) -> None:
+    """Push supervisor'у команды, что работник не вычел обед. Себе не шлём."""
+    sup_worker_id = await db.fetchval(
+        "SELECT u.worker_id FROM users u JOIN workers w ON w.id = u.worker_id "
+        "WHERE w.user_id=$1 AND u.role='supervisor' AND u.is_active=true ORDER BY u.created_at LIMIT 1",
+        tenant,
+    )
+    if sup_worker_id is None or sup_worker_id == worker_id:
+        return
+    await notifier.push_to_worker(
+        sup_worker_id, "Обед не вычтен",
+        f"{worker_name} не вычел обед — {d.isoformat()}, {object_name}",
+        url=f"/shifts?worker_id={worker_id}",
+    )
 
 
 @app.post("/shifts")
@@ -233,17 +261,23 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
 
     # Реальная ставка на момент смены (snapshot) — передаём явно.
     rate = await logic.resolve_hourly_rate(worker_id, user.id, user.hourly_rate)
+    hours_val = _resolve_hours(body.start_min, body.end_min, body.has_lunch, body.hours)
+    lunch_skipped = not body.has_lunch
 
     shift = await db.fetchrow(
         "INSERT INTO shifts "
         "(user_id, worker_id, date, day_of_week, object_name, start_time, end_time, "
-        " calculated_hours, hourly_rate_snapshot) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+        " calculated_hours, hourly_rate_snapshot, lunch_skipped) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
         "RETURNING id, date, day_of_week, object_name, worker_id, calculated_hours, "
-        "          start_time, end_time, hourly_rate_snapshot",
+        "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
         user.id, worker_id, d, day_of_week, object_name,
-        _min_to_time(body.start_min), _min_to_time(body.end_min), body.hours, rate,
+        _min_to_time(body.start_min), _min_to_time(body.end_min), hours_val, rate, lunch_skipped,
     )
+
+    # Обед не вычтен + создаёт РАБОТНИК (не supervisor) + не заглушено → push supervisor'у (не блокируя ответ).
+    if lunch_skipped and not body.suppress_notification and user.role == "worker":
+        asyncio.create_task(_notify_lunch_skipped(user.id, user.full_name, worker_id, d, object_name))
 
     hours = float(shift["calculated_hours"])
     snapshot = float(shift["hourly_rate_snapshot"])
@@ -256,7 +290,8 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
         "start_time": _hhmm(shift["start_time"]),
         "end_time": _hhmm(shift["end_time"]),
         "calculated_hours": hours,
-        "lunch_deducted": body.lunch_deducted,
+        "lunch_deducted": body.has_lunch,
+        "lunch_skipped": shift["lunch_skipped"],
         "hourly_rate": snapshot,
         "money": logic.money(hours, snapshot),  # приоритет — snapshot, не фиксированная ставка
     }
@@ -284,7 +319,7 @@ async def list_shifts(
 
     rows = await db.fetch(
         "SELECT s.id, s.date, s.day_of_week, s.object_name, s.worker_id, s.calculated_hours, "
-        "       s.start_time, s.end_time, s.hourly_rate_snapshot, w.name AS worker_name "
+        "       s.start_time, s.end_time, s.hourly_rate_snapshot, s.lunch_skipped, w.name AS worker_name "
         "FROM shifts s LEFT JOIN workers w ON w.id = s.worker_id "
         f"WHERE {where} "
         "ORDER BY s.date",
@@ -305,6 +340,7 @@ async def list_shifts(
             "start_min": _time_to_min(r["start_time"]),
             "end_min": _time_to_min(r["end_time"]),
             "hourly_rate": rate,
+            "lunch_skipped": r["lunch_skipped"],
             "money": logic.money(hours, rate),
         })
     return result
@@ -317,14 +353,15 @@ class ShiftPatch(BaseModel):
     start_min: int | None = None
     end_min: int | None = None
     hours: float | None = None
-    lunch_deducted: bool | None = None
+    has_lunch: bool | None = None  # Слой 7e
 
 
 async def _shift_for_edit(shift_id: int, user):
     """Смена, доступная пользователю (worker — своя, supervisor — команды), иначе None.
     shifts.user_id = tenant, поэтому фильтр по нему уже ограничивает командой."""
     row = await db.fetchrow(
-        "SELECT id, worker_id, date, hourly_rate_snapshot FROM shifts WHERE id=$1 AND user_id=$2",
+        "SELECT id, worker_id, date, hourly_rate_snapshot, start_time, end_time, lunch_skipped "
+        "FROM shifts WHERE id=$1 AND user_id=$2",
         shift_id, user.id,
     )
     if row is None:
@@ -362,10 +399,23 @@ async def update_shift(shift_id: int, body: ShiftPatch, user=Depends(require_aut
     if body.end_min is not None:
         sets.append(f"end_time=${len(args) + 1}")
         args.append(_min_to_time(body.end_min))
-    if body.hours is not None:
-        # hourly_rate_snapshot НЕ трогаем (Слой 3): ставка фиксируется при создании.
-        sets.append(f"calculated_hours=${len(args) + 1}")
-        args.append(body.hours)
+
+    # Слой 7e: если менялись время/обед/часы — пересчитываем calculated_hours и lunch_skipped.
+    # hourly_rate_snapshot НЕ трогаем (ставка фиксируется при создании).
+    if body.has_lunch is not None or body.start_min is not None or body.end_min is not None or body.hours is not None:
+        eff_start = body.start_min if body.start_min is not None else _time_to_min(shift["start_time"])
+        eff_end = body.end_min if body.end_min is not None else _time_to_min(shift["end_time"])
+        eff_has_lunch = body.has_lunch if body.has_lunch is not None else (not shift["lunch_skipped"])
+        if eff_start is not None and eff_end is not None:
+            new_hours = _resolve_hours(eff_start, eff_end, eff_has_lunch, body.hours)
+            sets.append(f"calculated_hours=${len(args) + 1}")
+            args.append(new_hours)
+        elif body.hours is not None:
+            sets.append(f"calculated_hours=${len(args) + 1}")
+            args.append(body.hours)
+        sets.append(f"lunch_skipped=${len(args) + 1}")
+        args.append(not eff_has_lunch)
+
     if not sets:
         raise HTTPException(status_code=400, detail="nothing to update")
     sets.append("updated_at=now()")
@@ -374,7 +424,7 @@ async def update_shift(shift_id: int, body: ShiftPatch, user=Depends(require_aut
     row = await db.fetchrow(
         f"UPDATE shifts SET {', '.join(sets)} WHERE id=${len(args)} "
         "RETURNING id, date, day_of_week, object_name, worker_id, calculated_hours, "
-        "          start_time, end_time, hourly_rate_snapshot",
+        "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
         *args,
     )
     hours = float(row["calculated_hours"]) if row["calculated_hours"] is not None else 0.0
@@ -389,6 +439,7 @@ async def update_shift(shift_id: int, body: ShiftPatch, user=Depends(require_aut
         "start_min": _time_to_min(row["start_time"]),
         "end_min": _time_to_min(row["end_time"]),
         "hourly_rate": rate,
+        "lunch_skipped": row["lunch_skipped"],
         "money": logic.money(hours, rate),  # пересчёт денег, ставка та же
     }
 

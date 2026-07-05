@@ -16,3 +16,9 @@ JWT_SECRET = os.getenv("JWT_SECRET", "")                       # секрет п
 # ── Слой 6: фото-чеки (Gemini Vision + Railway Volume) ───────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")   # ключ Gemini Vision (распознавание чеков)
 DATA_DIR = os.getenv("DATA_DIR", "/data")          # смонтированный Railway Volume для файлов чеков
+
+# ── Слой 7b: web push (VAPID) + субботние напоминания ────────────────────────
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")    # публичный ключ (браузер, applicationServerKey)
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")  # приватный ключ (сервер, pywebpush)
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:rodion2yalanskiy@axiom-void.com")
+SUBSCRIBER_TIMEZONE = os.getenv("SUBSCRIBER_TIMEZONE", "America/Los_Angeles")  # локальное время работников

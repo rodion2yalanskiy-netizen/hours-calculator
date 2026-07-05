@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import {
-  getShifts, previewShift, createShift, updateShift, deleteShift, getTeam,
+  getShifts, previewShift, createShift, updateShift, deleteShift, getTeam, getSettings, markWeekReported,
   type Shift, type PreviewResult, type RoundResult,
 } from '../api';
 import { hhmmToMinutes, fmtMoney, fmtHours, fmtCardDate, fmtRangeAmPm, formatDayReport, formatWeekReport } from '../format';
+import { openSMS } from '../lib/sms';
 import { haptic } from '../haptic';
 import { IconLock, IconMapPin, IconCopy, IconChevL, IconChevR, IconChevDown, IconPencil, IconTrash } from '../components/icons';
+
+interface ReportShift { date: string; object_name: string; start_min: number | null; end_min: number | null; calculated_hours: number }
 
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль',
   'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
@@ -96,6 +99,10 @@ export default function ShiftsPage() {
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [toast, setToast] = useState<{ msg: string; kind: 'ok' | 'err' | 'muted' } | null>(null);
   const [openOverride, setOpenOverride] = useState<Record<string, boolean>>({});
+  const [bossPhone, setBossPhone] = useState<string | null>(null);
+  const [successShift, setSuccessShift] = useState<ReportShift | null>(null);
+
+  useEffect(() => { getSettings().then((s) => setBossPhone(s.boss_phone)).catch(() => {}); }, []);
 
   const cursorTs = cursor.getTime();
   useEffect(() => {
@@ -231,7 +238,11 @@ export default function ShiftsPage() {
         hours: final.hours, lunch_deducted: final.lunch_deducted,
       };
       if (editId != null) { await updateShift(editId, payload); showToast('Смена обновлена'); }
-      else { await createShift({ worker_id: workerId, ...payload }); }
+      else {
+        await createShift({ worker_id: workerId, ...payload });
+        // Экран успеха с предложением отправить отчёт боссу (только при создании).
+        setSuccessShift({ date: payload.date, object_name: payload.object_name, start_min: payload.start_min, end_min: payload.end_min, calculated_hours: payload.hours });
+      }
       haptic('success');
       setShowForm(false); setEditId(null);
       reloadShifts();
@@ -311,9 +322,16 @@ export default function ShiftsPage() {
             {shifts.map((s) => <ShiftCard key={s.id} s={s} {...cardActions(s)} />)}
           </div>
           <button onClick={() => doCopy(formatWeekReport(shifts))}
-            className="w-full mt-5 bg-accent text-bg-2 font-semibold rounded-2xl py-3.5 flex items-center justify-center gap-2 hover:bg-accent-2">
+            className="w-full mt-5 bg-bg-2 border border-border-2 text-text font-semibold rounded-2xl py-3.5 flex items-center justify-center gap-2 hover:border-accent">
             <IconCopy className="w-5 h-5" /> Скопировать неделю
           </button>
+          <button
+            onClick={() => { if (!bossPhone) return; markWeekReported(isoOf(weekStart(cursor))).catch(() => {}); openSMS(bossPhone, formatWeekReport(shifts)); }}
+            disabled={!bossPhone}
+            className={`w-full mt-3 font-semibold rounded-2xl py-3.5 flex items-center justify-center gap-2 ${bossPhone ? 'bg-accent text-bg-2 hover:bg-accent-2' : 'bg-bg-3 text-text-muted'}`}>
+            📨 Отправить недельный отчёт
+          </button>
+          {!bossPhone && <p className="text-warning text-xs text-center mt-2">⚠️ Номер босса не задан. Попросите старшего добавить в Настройках.</p>}
         </>
       ) : (
         <div className="space-y-3">
@@ -339,6 +357,26 @@ export default function ShiftsPage() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Экран успеха + отправка отчёта боссу (после создания смены) */}
+      {successShift && (
+        <div className="fixed inset-0 z-40 bg-black/60 flex md:items-center md:justify-center" onClick={() => setSuccessShift(null)}>
+          <div className="bg-bg-2 border border-border w-full h-full overflow-y-auto md:h-auto md:max-w-[440px] md:rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-bold text-accent mb-3">Смена сохранена ✓</h2>
+            <pre className="bg-bg-3 border border-border rounded-xl p-4 text-sm whitespace-pre-wrap font-sans mb-4">{formatDayReport(successShift)}</pre>
+            {!bossPhone && <p className="text-warning text-xs mb-3">⚠️ Номер босса не задан. Попросите старшего добавить в Настройках.</p>}
+            <div className="flex gap-3">
+              <button onClick={() => setSuccessShift(null)} className="flex-1 rounded-xl py-3 bg-bg-3 text-text-muted">Закрыть</button>
+              <button
+                onClick={() => { if (bossPhone) openSMS(bossPhone, formatDayReport(successShift)); }}
+                disabled={!bossPhone}
+                className={`flex-1 rounded-xl py-3 font-semibold ${bossPhone ? 'bg-accent text-bg-2 hover:bg-accent-2' : 'bg-bg-3 text-text-muted'}`}>
+                📨 Отправить боссу
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

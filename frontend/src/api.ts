@@ -230,6 +230,30 @@ export async function deleteShift(id: number): Promise<void> {
   throw new Error(await errorDetail(res));
 }
 
+// ── Отчёты / push (Layer 7b) ─────────────────────────────────────────────────────
+export async function markWeekReported(week_start: string): Promise<void> {
+  await apiFetch<{ success: boolean }>('/shifts/mark-week-reported', { method: 'POST', body: JSON.stringify({ week_start }) });
+}
+export async function getVapidPublicKey(): Promise<string> {
+  const r = await apiFetch<{ public_key: string }>('/push/vapid-public-key');
+  return r.public_key;
+}
+export async function subscribeToPush(body: {
+  endpoint: string; keys: { p256dh: string; auth: string }; user_agent?: string;
+}): Promise<void> {
+  await apiFetch<{ subscription_id: string }>('/push/subscribe', { method: 'POST', body: JSON.stringify(body) });
+}
+export async function unsubscribeFromPush(endpoint: string): Promise<void> {
+  if (!API_URL) return;
+  const res = await fetch(`${API_URL}/push/unsubscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) },
+    body: JSON.stringify({ endpoint }),
+  });
+  if (res.status === 401) { clearToken(); window.dispatchEvent(new Event(AUTH_UNAUTHORIZED)); return; }
+  // 204 или ошибка — не критично для UI отписки
+}
+
 // ── Настройки (Layer 7a) ────────────────────────────────────────────────────────
 export async function getSettings(): Promise<Settings> {
   return apiFetch<Settings>('/settings');

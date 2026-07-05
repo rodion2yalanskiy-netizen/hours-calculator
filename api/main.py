@@ -21,6 +21,8 @@ from payouts import router as payouts_router
 from summary import router as summary_router
 from receipts import router as receipts_router, ensure_storage
 from settings import router as settings_router
+from push import router as push_router
+import scheduler as sched
 from db import run_migrations
 from config import CORS_ORIGIN, JWT_SECRET
 import calc
@@ -55,7 +57,11 @@ async def lifespan(app: FastAPI):
     ensure_storage()  # создать /data/receipts (Слой 6, Railway Volume)
     # Единственный владелец схемы: применяем миграцию + сиды на старте (идемпотентно, под lock).
     await run_migrations()
-    yield
+    sched.start()  # субботние push-напоминания (Слой 7b)
+    try:
+        yield
+    finally:
+        sched.stop()
 
 
 app = FastAPI(title="Калькулятор часов API", lifespan=lifespan)
@@ -76,6 +82,7 @@ app.include_router(payouts_router)
 app.include_router(summary_router)
 app.include_router(receipts_router)
 app.include_router(settings_router)
+app.include_router(push_router)
 
 
 @app.get("/health")
@@ -403,3 +410,24 @@ async def delete_shift(shift_id: int, user=Depends(require_auth)):
         )
     await db.execute("DELETE FROM shifts WHERE id=$1", shift_id)
     return Response(status_code=204)
+
+
+# ── Слой 7b: отметка об отправке недельного отчёта (останавливает push) ────────
+class WeekReportBody(BaseModel):
+    week_start: str
+
+
+@app.post("/shifts/mark-week-reported")
+async def mark_week_reported(body: WeekReportBody, user=Depends(require_auth)):
+    if user.worker_id is None:
+        raise HTTPException(status_code=400, detail="current user has no linked worker")
+    try:
+        ws = date_cls.fromisoformat(body.week_start)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="week_start must be YYYY-MM-DD")
+    await db.execute(
+        "INSERT INTO weekly_reports (worker_id, week_start) VALUES ($1, $2) "
+        "ON CONFLICT (worker_id, week_start) DO UPDATE SET reported_at=now()",
+        user.worker_id, ws,
+    )
+    return {"success": True}

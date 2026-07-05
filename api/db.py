@@ -13,7 +13,9 @@ _pool: asyncpg.Pool | None = None
 # Произвольный фиксированный ключ для pg_advisory_lock (общий «замок» миграции).
 _MIGRATION_LOCK_KEY = 4920215
 
-_MIGRATION_FILE = pathlib.Path(__file__).parent / "migrations" / "001_init.sql"
+_MIGRATIONS_DIR = pathlib.Path(__file__).parent / "migrations"
+# Применяются по порядку на каждом старте (все идемпотентны: IF NOT EXISTS).
+_MIGRATION_FILES = ["001_init.sql", "002_receipts.sql"]
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -49,13 +51,14 @@ async def fetchval(sql: str, *args):
 
 
 async def run_migrations() -> None:
-    """Применить 001_init.sql + засеять бригаду и supervisor'а под advisory-lock."""
+    """Применить все миграции по порядку + засеять бригаду и supervisor'а под advisory-lock."""
     pool = await get_pool()
-    sql = _MIGRATION_FILE.read_text(encoding="utf-8")
     async with pool.acquire() as conn:
         await conn.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_KEY)
         try:
-            await conn.execute(sql)  # multi-statement DDL, все IF NOT EXISTS
+            for name in _MIGRATION_FILES:
+                sql = (_MIGRATIONS_DIR / name).read_text(encoding="utf-8")
+                await conn.execute(sql)  # multi-statement DDL, все IF NOT EXISTS
             await _seed_workers(conn)      # стартовая бригада (идемпотентно)
             await _seed_supervisor(conn)   # supervisor-аккаунт (Слой 2, идемпотентно)
         finally:

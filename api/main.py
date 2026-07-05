@@ -19,6 +19,7 @@ from auth import router as auth_router
 from team import router as team_router
 from payouts import router as payouts_router
 from summary import router as summary_router
+from receipts import router as receipts_router, ensure_storage
 from db import run_migrations
 from config import CORS_ORIGIN, JWT_SECRET
 import calc
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     # пустым/слабым ключом и подделывались). openssl rand -hex 32 → 64 символа.
     if not JWT_SECRET or len(JWT_SECRET) < 32:
         raise RuntimeError("JWT_SECRET must be set and at least 32 characters long")
+    ensure_storage()  # создать /data/receipts (Слой 6, Railway Volume)
     # Единственный владелец схемы: применяем миграцию + сиды на старте (идемпотентно, под lock).
     await run_migrations()
     yield
@@ -71,6 +73,7 @@ app.include_router(auth_router)
 app.include_router(team_router)
 app.include_router(payouts_router)
 app.include_router(summary_router)
+app.include_router(receipts_router)
 
 
 @app.get("/health")

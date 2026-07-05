@@ -106,9 +106,18 @@ export interface Payout {
   shortfall_reason: 'debt' | 'fine' | null;
   shortfall_note: string | null;
   paid_at: string;
+  receipt_id: string | null;
   earned_by_hours: number;
   bonus: number;
   shortfall: number;
+}
+
+export interface ReceiptUploadResponse {
+  receipt_id: string;
+  is_receipt_confirmed: boolean;
+  recognized_amount: number | null;
+  notes: string;
+  file_url: string;
 }
 
 export interface WeeklySummary {
@@ -229,12 +238,59 @@ export async function createPayout(body: {
   return apiFetch<Payout>('/payouts', { method: 'POST', body: JSON.stringify(body) });
 }
 export async function updatePayout(id: string, body: {
-  amount_paid?: number; shortfall_reason?: 'debt' | 'fine'; shortfall_note?: string;
+  amount_paid?: number; receipt_id?: string; shortfall_reason?: 'debt' | 'fine' | null; shortfall_note?: string;
 }): Promise<Payout> {
   return apiFetch<Payout>(`/payouts/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
 }
 export async function deletePayout(id: string): Promise<void> {
   await apiFetch<{ ok: boolean }>(`/payouts/${id}`, { method: 'DELETE' });
+}
+
+// ── Чеки (Layer 6) ──────────────────────────────────────────────────────────────
+/** Загрузка фото чека (multipart) → распознавание Gemini. */
+export async function uploadReceipt(file: File): Promise<ReceiptUploadResponse> {
+  if (!API_URL) throw new Error('VITE_API_URL не задан');
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${API_URL}/receipts/upload`, {
+    method: 'POST',
+    headers: { ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) }, // без Content-Type — браузер сам ставит boundary
+    body: form,
+  });
+  if (res.status === 401) { clearToken(); window.dispatchEvent(new Event(AUTH_UNAUTHORIZED)); throw new Error('Сессия истекла (401)'); }
+  if (!res.ok) throw new Error(await errorDetail(res));
+  return (await res.json()) as ReceiptUploadResponse;
+}
+
+export async function createPayoutFromReceipt(body: {
+  receipt_id: string; week_start: string; week_end: string; confirmed_amount: number;
+  shortfall_reason?: 'debt' | 'fine'; shortfall_note?: string;
+}): Promise<Payout> {
+  return apiFetch<Payout>('/payouts/from-receipt', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export async function deleteReceipt(id: string): Promise<void> {
+  await apiFetch<{ ok: boolean }>(`/receipts/${id}`, { method: 'DELETE' });
+}
+
+export interface ReceiptMeta {
+  id: string; worker_id: number;
+  recognized_amount: number | null; confirmed_amount: number | null;
+  created_at: string; file_url: string;
+}
+export async function getReceiptMeta(id: string): Promise<ReceiptMeta> {
+  return apiFetch<ReceiptMeta>(`/receipts/${id}`);
+}
+
+/** Скачать файл чека с Bearer-заголовком и вернуть objectURL (для <img>). Освобождать через URL.revokeObjectURL. */
+export async function fetchReceiptObjectUrl(id: string): Promise<string> {
+  if (!API_URL) throw new Error('VITE_API_URL не задан');
+  const res = await fetch(`${API_URL}/receipts/${id}/file`, {
+    headers: { ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) },
+  });
+  if (res.status === 401) { clearToken(); window.dispatchEvent(new Event(AUTH_UNAUTHORIZED)); throw new Error('Сессия истекла (401)'); }
+  if (!res.ok) throw new Error(await errorDetail(res));
+  return URL.createObjectURL(await res.blob());
 }
 
 // ── Сводки (экраны — Layer 4d) ─────────────────────────────────────────────────

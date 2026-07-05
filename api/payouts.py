@@ -4,6 +4,7 @@
 current_user.worker_id и для worker, и для supervisor). earned_by_hours не хранится —
 считается из shifts на лету.
 """
+import os
 from datetime import date as date_cls
 
 import asyncpg
@@ -29,6 +30,16 @@ class PayoutCreate(BaseModel):
 
 class PayoutPatch(BaseModel):
     amount_paid: float | None = None
+    receipt_id: str | None = None
+    shortfall_reason: str | None = None
+    shortfall_note: str | None = None
+
+
+class PayoutFromReceipt(BaseModel):
+    receipt_id: str
+    week_start: str
+    week_end: str
+    confirmed_amount: float
     shortfall_reason: str | None = None
     shortfall_note: str | None = None
 
@@ -60,10 +71,27 @@ async def _enrich(row, tenant: int) -> dict:
         "shortfall_reason": row["shortfall_reason"],
         "shortfall_note": row["shortfall_note"],
         "paid_at": row["paid_at"].isoformat(),
+        "receipt_id": str(row["receipt_id"]) if row["receipt_id"] else None,
         "earned_by_hours": round(earned, 2),
         "bonus": round(max(0.0, amount_paid - earned), 2),
         "shortfall": round(max(0.0, earned - amount_paid), 2),
     }
+
+
+def _check_shortfall(amount: float, earned: float, reason: str | None, note: str | None) -> None:
+    """Единая валидация недоплаты/причины/заметки для create-from-receipt и patch."""
+    if amount < 0:
+        raise HTTPException(status_code=400, detail="amount must be >= 0")
+    if amount < earned:
+        if reason not in _REASONS:
+            raise HTTPException(
+                status_code=400,
+                detail="amount is below earned — shortfall_reason ('debt' or 'fine') is required",
+            )
+    elif reason is not None and reason not in _REASONS:
+        raise HTTPException(status_code=400, detail="shortfall_reason must be 'debt' or 'fine'")
+    if reason == "fine" and not (note and str(note).strip()):
+        raise HTTPException(status_code=400, detail="shortfall_note is required when reason is 'fine'")
 
 
 @router.get("")
@@ -95,7 +123,7 @@ async def list_payouts(
 
     rows = await db.fetch(
         "SELECT p.id, p.worker_id, p.week_start, p.week_end, p.amount_paid, "
-        "       p.shortfall_reason, p.shortfall_note, p.paid_at "
+        "       p.shortfall_reason, p.shortfall_note, p.paid_at, p.receipt_id "
         f"FROM weekly_payouts p {join} "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY p.week_start DESC",
@@ -106,39 +134,55 @@ async def list_payouts(
 
 @router.post("")
 async def create_payout(body: PayoutCreate, current: CurrentUser = Depends(require_auth)):
+    # Слой 6: ручной ввод суммы отключён — выплата только по чеку.
+    raise HTTPException(
+        status_code=400,
+        detail="Для создания выплаты нужен чек. Используй /payouts/from-receipt",
+    )
+
+
+@router.post("/from-receipt")
+async def create_payout_from_receipt(body: PayoutFromReceipt, current: CurrentUser = Depends(require_auth)):
     worker_id = _own_worker_id(current)
     ws = _parse_date(body.week_start, "week_start")
     we = _parse_date(body.week_end, "week_end")
-
     if not logic.is_monday(ws):
         raise HTTPException(status_code=400, detail="week_start must be a Monday")
     if we != logic.week_end_of(ws):
         raise HTTPException(status_code=400, detail="week_end must be week_start + 6 days (Sunday)")
-    if body.amount_paid < 0:
-        raise HTTPException(status_code=400, detail="amount_paid must be >= 0")
+
+    # Чек: свой, подтверждён как чек, ещё не привязан.
+    rec = await db.fetchrow(
+        "SELECT id, worker_id, is_receipt_confirmed FROM receipts WHERE id=$1::uuid",
+        body.receipt_id,
+    )
+    if rec is None or rec["worker_id"] != worker_id:
+        raise HTTPException(status_code=404, detail="receipt not found")
+    if not rec["is_receipt_confirmed"]:
+        raise HTTPException(status_code=400, detail="receipt is not confirmed as a receipt")
+    if await db.fetchval("SELECT 1 FROM weekly_payouts WHERE receipt_id=$1::uuid", body.receipt_id):
+        raise HTTPException(status_code=400, detail="receipt already used for a payout")
 
     earned, _h, _c = await logic.earned_for_week(worker_id, current.id, ws, we)
-    reason = body.shortfall_reason
-    if body.amount_paid < earned:
-        if reason not in _REASONS:
-            raise HTTPException(
-                status_code=400,
-                detail="amount_paid is below earned — shortfall_reason ('debt' or 'fine') is required",
-            )
-    elif reason is not None and reason not in _REASONS:
-        raise HTTPException(status_code=400, detail="shortfall_reason must be 'debt' or 'fine'")
-    if reason == "fine" and not (body.shortfall_note and body.shortfall_note.strip()):
-        raise HTTPException(status_code=400, detail="shortfall_note is required when reason is 'fine'")
+    _check_shortfall(body.confirmed_amount, earned, body.shortfall_reason, body.shortfall_note)
 
+    pool = await db.get_pool()
     try:
-        row = await db.fetchrow(
-            "INSERT INTO weekly_payouts "
-            "(worker_id, week_start, week_end, amount_paid, shortfall_reason, shortfall_note) "
-            "VALUES ($1, $2, $3, $4, $5, $6) "
-            "RETURNING id, worker_id, week_start, week_end, amount_paid, "
-            "          shortfall_reason, shortfall_note, paid_at",
-            worker_id, ws, we, body.amount_paid, reason, body.shortfall_note,
-        )
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE receipts SET confirmed_amount=$1 WHERE id=$2::uuid",
+                    body.confirmed_amount, body.receipt_id,
+                )
+                row = await conn.fetchrow(
+                    "INSERT INTO weekly_payouts "
+                    "(worker_id, week_start, week_end, amount_paid, shortfall_reason, shortfall_note, receipt_id) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7::uuid) "
+                    "RETURNING id, worker_id, week_start, week_end, amount_paid, "
+                    "          shortfall_reason, shortfall_note, paid_at, receipt_id",
+                    worker_id, ws, we, body.confirmed_amount, body.shortfall_reason,
+                    body.shortfall_note, body.receipt_id,
+                )
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="payout for this week already exists")
     return await _enrich(row, current.id)
@@ -155,19 +199,40 @@ async def patch_payout(payout_id: str, body: PayoutPatch, current: CurrentUser =
     if existing is None or existing["worker_id"] != worker_id:
         raise HTTPException(status_code=404, detail="payout not found")
 
+    # Слой 6: сумму можно менять ТОЛЬКО с новым чеком (нельзя вручную).
+    if body.amount_paid is not None and body.receipt_id is None:
+        raise HTTPException(status_code=400, detail="to change the amount, attach a new receipt")
+    if body.receipt_id is not None:
+        if body.amount_paid is None:
+            raise HTTPException(status_code=400, detail="amount_paid is required with receipt_id")
+        rec = await db.fetchrow(
+            "SELECT id, worker_id, is_receipt_confirmed FROM receipts WHERE id=$1::uuid",
+            body.receipt_id,
+        )
+        if rec is None or rec["worker_id"] != worker_id:
+            raise HTTPException(status_code=404, detail="receipt not found")
+        if not rec["is_receipt_confirmed"]:
+            raise HTTPException(status_code=400, detail="receipt is not confirmed as a receipt")
+        used = await db.fetchval(
+            "SELECT 1 FROM weekly_payouts WHERE receipt_id=$1::uuid AND id<>$2::uuid",
+            body.receipt_id, payout_id,
+        )
+        if used:
+            raise HTTPException(status_code=400, detail="receipt already used for another payout")
+
+    new_amount = body.amount_paid if body.amount_paid is not None else float(existing["amount_paid"])
     new_reason = body.shortfall_reason if body.shortfall_reason is not None else existing["shortfall_reason"]
     new_note = body.shortfall_note if body.shortfall_note is not None else existing["shortfall_note"]
-    if new_reason is not None and new_reason not in _REASONS:
-        raise HTTPException(status_code=400, detail="shortfall_reason must be 'debt' or 'fine'")
-    if body.amount_paid is not None and body.amount_paid < 0:
-        raise HTTPException(status_code=400, detail="amount_paid must be >= 0")
-    if new_reason == "fine" and not (new_note and str(new_note).strip()):
-        raise HTTPException(status_code=400, detail="shortfall_note is required when reason is 'fine'")
+    earned, _h, _c = await logic.earned_for_week(worker_id, current.id, existing["week_start"], existing["week_end"])
+    _check_shortfall(new_amount, earned, new_reason, new_note)
 
     sets, args = [], []
     if body.amount_paid is not None:
         sets.append(f"amount_paid=${len(args) + 1}")
         args.append(body.amount_paid)
+    if body.receipt_id is not None:
+        sets.append(f"receipt_id=${len(args) + 1}::uuid")
+        args.append(body.receipt_id)
     if body.shortfall_reason is not None:
         sets.append(f"shortfall_reason=${len(args) + 1}")
         args.append(body.shortfall_reason)
@@ -180,7 +245,7 @@ async def patch_payout(payout_id: str, body: PayoutPatch, current: CurrentUser =
     row = await db.fetchrow(
         f"UPDATE weekly_payouts SET {', '.join(sets)} WHERE id=${len(args)}::uuid "
         "RETURNING id, worker_id, week_start, week_end, amount_paid, "
-        "          shortfall_reason, shortfall_note, paid_at",
+        "          shortfall_reason, shortfall_note, paid_at, receipt_id",
         *args,
     )
     return await _enrich(row, current.id)
@@ -189,10 +254,28 @@ async def patch_payout(payout_id: str, body: PayoutPatch, current: CurrentUser =
 @router.delete("/{payout_id}")
 async def delete_payout(payout_id: str, current: CurrentUser = Depends(require_auth)):
     worker_id = _own_worker_id(current)
-    deleted = await db.fetchval(
-        "DELETE FROM weekly_payouts WHERE id=$1::uuid AND worker_id=$2 RETURNING id",
+    payout = await db.fetchrow(
+        "SELECT id, receipt_id FROM weekly_payouts WHERE id=$1::uuid AND worker_id=$2",
         payout_id, worker_id,
     )
-    if deleted is None:
+    if payout is None:
         raise HTTPException(status_code=404, detail="payout not found")
-    return {"ok": True, "id": str(deleted)}
+
+    # Забираем путь к файлу чека, чтобы удалить с диска после удаления записей.
+    file_path = None
+    if payout["receipt_id"]:
+        rec = await db.fetchrow("SELECT file_path FROM receipts WHERE id=$1", payout["receipt_id"])
+        file_path = rec["file_path"] if rec else None
+
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM weekly_payouts WHERE id=$1::uuid", payout_id)
+            if payout["receipt_id"]:  # FK: payout удалён раньше — receipt можно чистить
+                await conn.execute("DELETE FROM receipts WHERE id=$1", payout["receipt_id"])
+    if file_path:
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+    return {"ok": True, "id": str(payout["id"])}

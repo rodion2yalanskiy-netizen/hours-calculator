@@ -55,3 +55,9 @@ export const IconCoins = ({ className }: IconProps) => (
 export const IconPlus = ({ className }: IconProps) => (
   <svg {...base(className)}><path d="M12 5v14M5 12h14" /></svg>
 );
+export const IconPaperclip = ({ className }: IconProps) => (
+  <svg {...base(className)}><path d="M21 12l-8.5 8.5a5 5 0 0 1-7-7L14 5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 8" /></svg>
+);
+export const IconCamera = ({ className }: IconProps) => (
+  <svg {...base(className)}><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z" /><circle cx="12" cy="13" r="3.5" /></svg>
+);

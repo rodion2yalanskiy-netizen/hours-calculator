@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import {
   getSummaryPeriod, getPayouts,
@@ -7,11 +8,13 @@ import {
 import { isoOf, monthStart, monthEnd, addMonths, monthLabel, isFutureMonth } from '../period';
 import { formatWeekLabel, getCurrentWeekStart, isPastWeek } from '../lib/weeks';
 import { fmtUSD, fmtHours } from '../format';
-import { IconChevL, IconChevR, IconCheckCircle, IconCoins, IconAlertTriangle, IconClock } from '../components/icons';
-import PayoutModal, { type PayoutModalExisting } from '../components/PayoutModal';
+import { IconChevL, IconChevR, IconCheckCircle, IconCoins, IconAlertTriangle, IconClock, IconCamera, IconPaperclip } from '../components/icons';
+import PayoutReasonModal from '../components/PayoutReasonModal';
+import ReceiptViewer from '../components/ReceiptViewer';
 
 export default function PayoutsPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const workerId = user?.worker_id ?? undefined;
   const today = useMemo(() => new Date(), []);
   const currentWeek = useMemo(() => getCurrentWeekStart(), []);
@@ -22,7 +25,8 @@ export default function PayoutsPage() {
   const [payoutMap, setPayoutMap] = useState<Record<string, Payout>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [modal, setModal] = useState<{ week: WeeklySummary; existing: PayoutModalExisting | null } | null>(null);
+  const [editPayout, setEditPayout] = useState<Payout | null>(null);
+  const [viewerReceiptId, setViewerReceiptId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const cursorTs = cursor.getTime();
@@ -62,13 +66,8 @@ export default function PayoutsPage() {
   const unpaid = shown.filter((wk) => wk.status === 'unpaid' && wk.total_hours > 0 && isPastWeek(wk.week_end));
   const canNext = !isFutureMonth(addMonths(cursor, 1), today);
 
-  const openModal = (wk: WeeklySummary) => {
-    const p = payoutMap[wk.week_start];
-    setModal({
-      week: wk,
-      existing: p ? { id: p.id, amount_paid: p.amount_paid, shortfall_reason: p.shortfall_reason, shortfall_note: p.shortfall_note } : null,
-    });
-  };
+  const onCapture = (wk: WeeklySummary) => navigate(`/payouts/receipt?week_start=${wk.week_start}`);
+  const onEdit = (wk: WeeklySummary) => { const p = payoutMap[wk.week_start]; if (p) setEditPayout(p); };
   const scrollToUnpaid = () => {
     const el = document.getElementById(`week-${unpaid[0]?.week_start}`);
     el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -126,19 +125,22 @@ export default function PayoutsPage() {
       {!loading && !error && (
         <div className="space-y-3">
           {shown.map((wk) => (
-            <WeekCard key={wk.week_start} wk={wk} isCurrent={wk.week_start === currentWeek} onAction={() => openModal(wk)} />
+            <WeekCard key={wk.week_start} wk={wk} payout={payoutMap[wk.week_start] ?? null}
+              isCurrent={wk.week_start === currentWeek}
+              onCapture={() => onCapture(wk)} onEdit={() => onEdit(wk)}
+              onViewReceipt={(rid) => setViewerReceiptId(rid)} />
           ))}
         </div>
       )}
 
-      {modal && (
-        <PayoutModal
-          week={modal.week}
-          existing={modal.existing}
-          onClose={() => setModal(null)}
-          onSaved={() => { setModal(null); showToast('Выплата сохранена'); load(); }}
+      {editPayout && (
+        <PayoutReasonModal
+          payout={editPayout}
+          onClose={() => setEditPayout(null)}
+          onSaved={() => { setEditPayout(null); showToast('Сохранено'); load(); }}
         />
       )}
+      {viewerReceiptId && <ReceiptViewer receiptId={viewerReceiptId} onClose={() => setViewerReceiptId(null)} />}
 
       {toast && (
         <div className="fixed bottom-24 inset-x-0 flex justify-center pointer-events-none z-30">
@@ -158,8 +160,11 @@ function Row({ label, value, valueCls }: { label: string; value: string; valueCl
   );
 }
 
-function WeekCard({ wk, isCurrent, onAction }: { wk: WeeklySummary; isCurrent: boolean; onAction: () => void }) {
-  const paid = wk.payout != null;
+function WeekCard({ wk, payout, isCurrent, onCapture, onEdit, onViewReceipt }: {
+  wk: WeeklySummary; payout: Payout | null; isCurrent: boolean;
+  onCapture: () => void; onEdit: () => void; onViewReceipt: (receiptId: string) => void;
+}) {
+  const paid = payout != null;
   return (
     <div id={`week-${wk.week_start}`} className="bg-bg-2 border border-border rounded-2xl p-4">
       <div className="flex items-start justify-between gap-2 mb-3">
@@ -167,10 +172,21 @@ function WeekCard({ wk, isCurrent, onAction }: { wk: WeeklySummary; isCurrent: b
           <h3 className="font-semibold">{formatWeekLabel(wk.week_start, wk.week_end)}</h3>
           {isCurrent && <span className="text-[11px] bg-accent-dim text-accent px-2 py-0.5 rounded-full">Эта неделя</span>}
         </div>
-        <button onClick={onAction}
-          className={`shrink-0 rounded-xl px-3 py-1.5 text-sm font-medium ${paid ? 'bg-bg-3 border border-border-2 hover:border-accent' : 'bg-accent text-bg-2 hover:bg-accent-2'}`}>
-          {paid ? 'Изменить' : '+ Ввести'}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {payout?.receipt_id && (
+            <button onClick={() => onViewReceipt(payout.receipt_id!)} aria-label="Открыть чек"
+              className="w-8 h-8 rounded-xl bg-bg-3 border border-border-2 flex items-center justify-center text-text-3 hover:text-accent">
+              <IconPaperclip className="w-4 h-4" />
+            </button>
+          )}
+          {paid ? (
+            <button onClick={onEdit} className="rounded-xl px-3 py-1.5 text-sm font-medium bg-bg-3 border border-border-2 hover:border-accent">Изменить</button>
+          ) : (
+            <button onClick={onCapture} className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-sm font-medium bg-accent text-bg-2 hover:bg-accent-2">
+              <IconCamera className="w-4 h-4" /> Внести чек
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="text-sm space-y-1">
@@ -180,7 +196,7 @@ function WeekCard({ wk, isCurrent, onAction }: { wk: WeeklySummary; isCurrent: b
         </div>
         <div className="flex justify-between">
           <span className="text-text-muted">Получено</span>
-          <span>{paid ? fmtUSD(wk.payout!.amount_paid) : <span className="text-text-muted">— ещё не рассчитались</span>}</span>
+          <span>{payout ? fmtUSD(payout.amount_paid) : <span className="text-text-muted">— ещё не рассчитались</span>}</span>
         </div>
       </div>
 

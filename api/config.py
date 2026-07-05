@@ -12,3 +12,7 @@ OWNER_EMAIL = os.getenv("OWNER_EMAIL", "")                      # email supervis
 OWNER_INITIAL_PASSWORD = os.getenv("OWNER_INITIAL_PASSWORD", "")  # стартовый пароль → bcrypt-хэш при сиде
 OWNER_FULL_NAME = os.getenv("OWNER_FULL_NAME", "")             # отображаемое имя supervisor'а
 JWT_SECRET = os.getenv("JWT_SECRET", "")                       # секрет подписи JWT (openssl rand -hex 32)
+
+# ── Слой 6: фото-чеки (Gemini Vision + Railway Volume) ───────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")   # ключ Gemini Vision (распознавание чеков)
+DATA_DIR = os.getenv("DATA_DIR", "/data")          # смонтированный Railway Volume для файлов чеков

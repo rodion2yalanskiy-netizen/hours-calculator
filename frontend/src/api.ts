@@ -56,6 +56,7 @@ export interface Worker {
 }
 
 export interface Shift {
+  id: number;
   date: string;
   day_of_week: string;
   object_name: string;
@@ -66,6 +67,10 @@ export interface Shift {
   money: number;
   start_min: number | null;
   end_min: number | null;
+}
+
+export interface Settings {
+  boss_phone: string | null;
 }
 
 export type RoundResult =
@@ -205,6 +210,32 @@ export async function getShifts(year: number, month: number, worker_id?: number)
   const q = new URLSearchParams({ year: String(year), month: String(month) });
   if (worker_id != null) q.set('worker_id', String(worker_id));
   return apiFetch<Shift[]>(`/shifts?${q.toString()}`);
+}
+
+export async function updateShift(id: number, body: {
+  date?: string; object_name?: string; start_min?: number; end_min?: number; hours?: number; lunch_deducted?: boolean;
+}): Promise<Shift> {
+  return apiFetch<Shift>(`/shifts/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+}
+
+/** DELETE /shifts/{id} → 204 (без тела). 409 если у недели уже есть выплата. */
+export async function deleteShift(id: number): Promise<void> {
+  if (!API_URL) throw new Error('VITE_API_URL не задан');
+  const res = await fetch(`${API_URL}/shifts/${id}`, {
+    method: 'DELETE',
+    headers: { ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) },
+  });
+  if (res.status === 401) { clearToken(); window.dispatchEvent(new Event(AUTH_UNAUTHORIZED)); throw new Error('Сессия истекла (401)'); }
+  if (res.status === 204 || res.ok) return;
+  throw new Error(await errorDetail(res));
+}
+
+// ── Настройки (Layer 7a) ────────────────────────────────────────────────────────
+export async function getSettings(): Promise<Settings> {
+  return apiFetch<Settings>('/settings');
+}
+export async function updateSettings(body: { boss_phone: string | null }): Promise<Settings> {
+  return apiFetch<Settings>('/settings', { method: 'PATCH', body: JSON.stringify(body) });
 }
 
 // ── Команда ────────────────────────────────────────────────────────────────────

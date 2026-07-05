@@ -2,12 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import {
-  getShifts, previewShift, createShift, getTeam,
+  getShifts, previewShift, createShift, updateShift, deleteShift, getTeam,
   type Shift, type PreviewResult, type RoundResult,
 } from '../api';
-import { hhmmToMinutes, fmtMoney, fmtHours, fmtCardDate, fmtRangeAmPm } from '../format';
+import { hhmmToMinutes, fmtMoney, fmtHours, fmtCardDate, fmtRangeAmPm, formatDayReport, formatWeekReport } from '../format';
 import { haptic } from '../haptic';
-import { IconLock, IconMapPin, IconCopy, IconChevL, IconChevR } from '../components/icons';
+import { IconLock, IconMapPin, IconCopy, IconChevL, IconChevR, IconChevDown, IconPencil, IconTrash } from '../components/icons';
 
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль',
   'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
@@ -22,6 +22,8 @@ const weekStart = (d: Date) => addDays(d, -(((d.getDay() + 6) % 7)));
 const weekEnd = (d: Date) => addDays(weekStart(d), 6);
 const weekNumOf = (d: Date) => Math.floor((weekStart(d).getDate() - 1) / 7) + 1;
 const todayISO = () => isoOf(new Date());
+const parseISO = (s: string) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const minToHHMM = (min: number | null) => (min == null ? '' : `${pad(Math.floor(min / 60))}:${pad(min % 60)}`);
 
 function weekRangeLabel(ws: Date, we: Date): string {
   if (ws.getMonth() === we.getMonth()) return `${ws.getDate()}–${we.getDate()} ${MONTHS_GEN[we.getMonth()]}`;
@@ -39,21 +41,18 @@ async function copyText(text: string): Promise<void> {
   document.body.removeChild(ta);
 }
 
-// ── Тексты копирования (формат зафиксирован — НЕ менять) ─────────────────────────
-function shiftDayText(s: Shift): string {
-  const lines = [fmtCardDate(s.date), s.object_name];
-  if (s.start_min != null && s.end_min != null) lines.push(fmtRangeAmPm(s.start_min, s.end_min));
-  lines.push(fmtHours(s.calculated_hours));
-  return lines.join('\n');
+// ── Выбор расчёта ─────────────────────────────────────────────────────────────
+function activeRound(p: PreviewResult | null, lunch: 'with' | 'without' | null): RoundResult | null {
+  if (!p) return null;
+  if (p.needs_lunch_choice) { if (!lunch) return null; return lunch === 'with' ? p.with_lunch : p.without_lunch; }
+  return p.round;
 }
-function weekText(weekN: number, range: string, shifts: Shift[]): string {
-  const header = `Неделя ${weekN} (${range})`;
-  const body = shifts.map(shiftDayText).join('\n\n');
-  const total = shifts.reduce((a, s) => a + (s.calculated_hours || 0), 0);
-  return `${header}\n\n${body}\n\nИтого за неделю: ${fmtHours(total)}`;
+function branchHoursLabel(r: RoundResult): string {
+  return r.needs_round_choice ? `${fmtHours(r.hours_down)}–${fmtHours(r.hours_up)}` : fmtHours(r.hours);
 }
 
 type Mode = 'month' | 'week';
+interface WeekGroup { key: string; ws: Date; we: Date; label: string; shifts: Shift[]; hours: number; money: number; isCurrent: boolean }
 
 async function loadPeriodShifts(mode: Mode, cursor: Date, workerId?: number): Promise<Shift[]> {
   if (mode === 'month') {
@@ -70,21 +69,10 @@ async function loadPeriodShifts(mode: Mode, cursor: Date, workerId?: number): Pr
   return arrays.flat().filter((s) => s.date >= lo && s.date <= hi).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-// ── Выбор расчёта ─────────────────────────────────────────────────────────────
-function activeRound(p: PreviewResult | null, lunch: 'with' | 'without' | null): RoundResult | null {
-  if (!p) return null;
-  if (p.needs_lunch_choice) { if (!lunch) return null; return lunch === 'with' ? p.with_lunch : p.without_lunch; }
-  return p.round;
-}
-function branchHoursLabel(r: RoundResult): string {
-  return r.needs_round_choice ? `${fmtHours(r.hours_down)}–${fmtHours(r.hours_up)}` : fmtHours(r.hours);
-}
-
 export default function ShiftsPage() {
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryWid = searchParams.get('worker_id');
-  // supervisor может смотреть/писать смены конкретного работника через ?worker_id=X
   const supervisorView = user?.role === 'supervisor' && queryWid != null;
   const workerId = supervisorView ? Number(queryWid) : (user?.worker_id ?? undefined);
   const [viewWorker, setViewWorker] = useState<{ name: string; rate: number } | null>(null);
@@ -106,7 +94,8 @@ export default function ShiftsPage() {
   const [mode, setMode] = useState<Mode>('month');
   const [cursor, setCursor] = useState<Date>(() => new Date());
   const [shifts, setShifts] = useState<Shift[]>([]);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; kind: 'ok' | 'err' | 'muted' } | null>(null);
+  const [openOverride, setOpenOverride] = useState<Record<string, boolean>>({});
 
   const cursorTs = cursor.getTime();
   useEffect(() => {
@@ -120,9 +109,9 @@ export default function ShiftsPage() {
 
   const reloadShifts = () => { loadPeriodShifts(mode, cursor, workerId).then(setShifts).catch(() => {}); };
 
-  const showToast = (msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast((t) => (t === msg ? null : t)), 1500);
+  const showToast = (msg: string, kind: 'ok' | 'err' | 'muted' = 'ok') => {
+    setToast({ msg, kind });
+    window.setTimeout(() => setToast((t) => (t?.msg === msg ? null : t)), 1800);
   };
   const doCopy = async (text: string) => { await copyText(text); haptic('light'); showToast('Скопировано'); };
 
@@ -141,8 +130,31 @@ export default function ShiftsPage() {
   const hoursSum = shifts.reduce((a, s) => a + (s.calculated_hours || 0), 0);
   const earnSum = shifts.reduce((a, s) => a + (s.money ?? 0), 0);
 
-  // ── Форма ──
+  // Группировка по неделям (для режима «Месяц»), свежие сверху.
+  const curWeekKey = isoOf(weekStart(today));
+  const weekGroups = useMemo<WeekGroup[]>(() => {
+    const map = new Map<string, Shift[]>();
+    for (const s of shifts) {
+      const key = isoOf(weekStart(parseISO(s.date)));
+      (map.get(key) ?? map.set(key, []).get(key)!).push(s);
+    }
+    return [...map.entries()].map(([key, arr]) => {
+      const gws = parseISO(key); const gwe = addDays(gws, 6);
+      const sorted = [...arr].sort((a, b) => a.date.localeCompare(b.date));
+      return {
+        key, ws: gws, we: gwe, label: weekRangeLabel(gws, gwe), shifts: sorted,
+        hours: sorted.reduce((a, s) => a + (s.calculated_hours || 0), 0),
+        money: sorted.reduce((a, s) => a + (s.money ?? 0), 0),
+        isCurrent: key === curWeekKey,
+      };
+    }).sort((a, b) => b.key.localeCompare(a.key));
+  }, [shifts, curWeekKey]);
+  const isOpen = (g: WeekGroup) => openOverride[g.key] ?? g.isCurrent;
+  const toggleWeek = (g: WeekGroup) => setOpenOverride((o) => ({ ...o, [g.key]: !(o[g.key] ?? g.isCurrent) }));
+
+  // ── Форма (создание/редактирование) ──
   const [showForm, setShowForm] = useState(false);
+  const [editId, setEditId] = useState<number | null>(null);
   const [fDate, setFDate] = useState(todayISO());
   const [fObject, setFObject] = useState('');
   const [fStart, setFStart] = useState('');
@@ -153,10 +165,29 @@ export default function ShiftsPage() {
   const [roundChoice, setRoundChoice] = useState<'down' | 'up' | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const openForm = () => {
+  const openCreate = () => {
+    setEditId(null);
     setFDate(todayISO()); setFObject(''); setFStart(''); setFEnd('');
     setPreview(null); setPreviewErr(null); setLunchChoice(null); setRoundChoice(null);
     setShowForm(true);
+  };
+  const openEdit = (s: Shift) => {
+    setEditId(s.id);
+    setFDate(s.date); setFObject(s.object_name);
+    setFStart(minToHHMM(s.start_min)); setFEnd(minToHHMM(s.end_min));
+    setPreview(null); setPreviewErr(null); setLunchChoice(null); setRoundChoice(null);
+    setShowForm(true);
+  };
+
+  const onDelete = async (s: Shift) => {
+    if (!window.confirm(`Точно удалить смену за ${fmtCardDate(s.date)}?`)) return;
+    try {
+      await deleteShift(s.id);
+      haptic('light'); showToast('Смена удалена', 'muted'); reloadShifts();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Не удалось удалить';
+      showToast(/выплат/i.test(msg) ? 'Нельзя удалить: за эту неделю уже создана выплата' : msg, 'err');
+    }
   };
 
   useEffect(() => {
@@ -194,13 +225,15 @@ export default function ShiftsPage() {
     if (!final || workerId == null) return;
     setSaving(true);
     try {
-      await createShift({
-        worker_id: workerId, date: fDate, object_name: fObject.trim(),
+      const payload = {
+        date: fDate, object_name: fObject.trim(),
         start_min: hhmmToMinutes(fStart), end_min: hhmmToMinutes(fEnd),
         hours: final.hours, lunch_deducted: final.lunch_deducted,
-      });
+      };
+      if (editId != null) { await updateShift(editId, payload); showToast('Смена обновлена'); }
+      else { await createShift({ worker_id: workerId, ...payload }); }
       haptic('success');
-      setShowForm(false);
+      setShowForm(false); setEditId(null);
       reloadShifts();
     } catch (e) {
       setPreviewErr(e instanceof Error ? e.message : 'Не удалось сохранить');
@@ -209,16 +242,18 @@ export default function ShiftsPage() {
     }
   };
 
-  const listView = mode === 'month' ? [...shifts].reverse() : shifts;
+  const cardActions = (s: Shift) => ({
+    onCopy: () => doCopy(formatDayReport(s)),
+    onEdit: () => openEdit(s),
+    onDelete: () => onDelete(s),
+  });
 
   return (
     <div className="relative">
       {supervisorView ? (
         <div className="flex items-center justify-between gap-2 mb-4">
           <h1 className="text-2xl font-bold truncate">Смены: {viewWorker?.name ?? '…'}</h1>
-          <button onClick={() => setSearchParams({})} className="shrink-0 text-text-muted text-sm hover:text-text">
-            × показать все
-          </button>
+          <button onClick={() => setSearchParams({})} className="shrink-0 text-text-muted text-sm hover:text-text">× показать все</button>
         </div>
       ) : (
         <h1 className="text-2xl font-bold mb-4">Мои смены</h1>
@@ -260,7 +295,7 @@ export default function ShiftsPage() {
 
       {/* Кнопка / форма */}
       {!showForm ? (
-        <button onClick={openForm} className="w-full bg-accent text-bg-2 font-semibold rounded-2xl py-4 mb-6 text-lg hover:bg-accent-2">
+        <button onClick={openCreate} className="w-full bg-accent text-bg-2 font-semibold rounded-2xl py-4 mb-6 text-lg hover:bg-accent-2">
           + Записать смену
         </button>
       ) : (
@@ -268,45 +303,70 @@ export default function ShiftsPage() {
       )}
 
       {/* Список */}
-      {listView.length === 0 ? (
+      {shifts.length === 0 ? (
         <p className="text-text-muted text-sm text-center py-8">Смен за этот период пока нет.</p>
+      ) : mode === 'week' ? (
+        <>
+          <div className="space-y-3">
+            {shifts.map((s) => <ShiftCard key={s.id} s={s} {...cardActions(s)} />)}
+          </div>
+          <button onClick={() => doCopy(formatWeekReport(shifts))}
+            className="w-full mt-5 bg-accent text-bg-2 font-semibold rounded-2xl py-3.5 flex items-center justify-center gap-2 hover:bg-accent-2">
+            <IconCopy className="w-5 h-5" /> Скопировать неделю
+          </button>
+        </>
       ) : (
         <div className="space-y-3">
-          {listView.map((s, i) => <ShiftCard key={i} s={s} onCopy={() => doCopy(shiftDayText(s))} />)}
+          {weekGroups.map((g) => (
+            <div key={g.key} className="bg-bg-2 border border-border rounded-2xl overflow-hidden">
+              <div className="flex items-center gap-2 p-4">
+                <button onClick={() => toggleWeek(g)} className="flex-1 flex items-center gap-2 text-left min-w-0">
+                  <IconChevDown className={`w-4 h-4 shrink-0 text-text-muted transition-transform ${isOpen(g) ? '' : '-rotate-90'}`} />
+                  <span className="min-w-0">
+                    <span className="font-semibold block truncate">Неделя {g.label}</span>
+                    <span className="text-text-muted text-xs">{g.shifts.length} смен · {fmtHours(g.hours)}{g.money > 0 && ` · ${fmtMoney(g.money)}`}</span>
+                  </span>
+                </button>
+                <button onClick={() => doCopy(formatWeekReport(g.shifts))} aria-label="Скопировать неделю"
+                  className="shrink-0 w-8 h-8 rounded-xl bg-bg-3 border border-border-2 flex items-center justify-center text-text-3 hover:text-accent">
+                  <IconCopy className="w-4 h-4" />
+                </button>
+              </div>
+              {isOpen(g) && (
+                <div className="px-4 pb-4 space-y-3">
+                  {g.shifts.map((s) => <ShiftCard key={s.id} s={s} {...cardActions(s)} />)}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
-      )}
-
-      {/* Копировать неделю */}
-      {mode === 'week' && shifts.length > 0 && (
-        <button onClick={() => doCopy(weekText(weekNumOf(cursor), weekRangeLabel(ws, we), shifts))}
-          className="w-full mt-5 bg-accent text-bg-2 font-semibold rounded-2xl py-3.5 flex items-center justify-center gap-2 hover:bg-accent-2">
-          <IconCopy className="w-5 h-5" /> Скопировать неделю
-        </button>
       )}
 
       {/* Тост */}
       {toast && (
         <div className="fixed bottom-24 inset-x-0 flex justify-center pointer-events-none z-30">
-          <div className="bg-bg-2 text-accent text-sm font-medium px-4 py-2 rounded-full shadow-lg border border-border">{toast}</div>
+          <div className={`text-sm font-medium px-4 py-2 rounded-full shadow-lg border border-border bg-bg-2 ${
+            toast.kind === 'err' ? 'text-danger' : toast.kind === 'muted' ? 'text-text-muted' : 'text-accent'}`}>
+            {toast.msg}
+          </div>
         </div>
       )}
     </div>
   );
 
-  // ── Форма записи смены (функция, не компонент — чтобы input не терял фокус) ──
+  // ── Форма (функция, не компонент — чтобы input не терял фокус) ──
   function renderForm() {
     return (
       <div className="bg-bg-2 border border-border rounded-2xl p-4 mb-6 space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-lg">Новая смена</h2>
-          <button onClick={() => setShowForm(false)} className="text-text-muted text-sm">Отмена</button>
+          <h2 className="font-semibold text-lg">{editId != null ? 'Изменить смену' : 'Новая смена'}</h2>
+          <button onClick={() => { setShowForm(false); setEditId(null); }} className="text-text-muted text-sm">Отмена</button>
         </div>
 
         <label className="block">
           <span className="text-text-3 text-xs">Дата</span>
-          <div className="mt-1 font-medium">{fmtCardDate(fDate)}</div>
           <input type="date" value={fDate} onChange={(e) => setFDate(e.target.value)}
-            className="mt-1 w-full bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent" />
+            className="mt-1 w-full bg-bg-3 border border-border-2 rounded-xl px-3 py-3 outline-none focus:border-accent text-center" />
         </label>
 
         <label className="block">
@@ -368,7 +428,7 @@ export default function ShiftsPage() {
 
         <button onClick={save} disabled={!canSave}
           className={`w-full font-semibold rounded-2xl py-4 text-lg ${canSave ? 'bg-accent text-bg-2 hover:bg-accent-2' : 'bg-bg-3 text-text-muted'}`}>
-          {saving ? 'Сохранение…' : 'Сохранить смену'}
+          {saving ? 'Сохранение…' : (editId != null ? 'Сохранить изменения' : 'Сохранить смену')}
         </button>
       </div>
     );
@@ -376,25 +436,31 @@ export default function ShiftsPage() {
 }
 
 // ── Карточка смены ──────────────────────────────────────────────────────────────
-function ShiftCard({ s, onCopy }: { s: Shift; onCopy: () => void }) {
+function ShiftCard({ s, onCopy, onEdit, onDelete }: {
+  s: Shift; onCopy: () => void; onEdit: () => void; onDelete: () => void;
+}) {
   return (
-    <div className="bg-bg-2 border border-border rounded-2xl p-4 flex items-start justify-between">
-      <div className="min-w-0">
-        <div className="font-medium">{fmtCardDate(s.date)}</div>
-        <div className="flex items-center gap-1 mt-1 text-text-muted text-sm truncate">
-          <IconMapPin className="w-4 h-4 text-text-muted shrink-0" />
-          <span className="truncate">{s.object_name}</span>
+    <div className="bg-bg-2 border border-border rounded-2xl p-4">
+      <div className="flex items-start justify-between">
+        <div className="min-w-0">
+          <div className="font-medium">{fmtCardDate(s.date)}</div>
+          <div className="flex items-center gap-1 mt-1 text-text-muted text-sm truncate">
+            <IconMapPin className="w-4 h-4 text-text-muted shrink-0" />
+            <span className="truncate">{s.object_name}</span>
+          </div>
+          {s.start_min != null && s.end_min != null && (
+            <div className="text-text-3 text-sm mt-1">{fmtRangeAmPm(s.start_min, s.end_min)}</div>
+          )}
         </div>
-        {s.start_min != null && s.end_min != null && (
-          <div className="text-text-3 text-sm mt-1">{fmtRangeAmPm(s.start_min, s.end_min)}</div>
-        )}
+        <div className="text-right shrink-0 pl-3">
+          <div className="font-semibold">{fmtHours(s.calculated_hours)}</div>
+          {s.money != null && <div className="text-accent text-sm">{fmtMoney(s.money)}</div>}
+        </div>
       </div>
-      <div className="text-right shrink-0 pl-3 flex flex-col items-end">
-        <div className="font-semibold">{fmtHours(s.calculated_hours)}</div>
-        {s.money != null && <div className="text-accent text-sm">{fmtMoney(s.money)}</div>}
-        <button onClick={onCopy} className="mt-2 text-text-muted hover:text-text" aria-label="Скопировать">
-          <IconCopy className="w-4 h-4" />
-        </button>
+      <div className="flex items-center justify-end gap-1 mt-2 pt-2 border-t border-border">
+        <button onClick={onCopy} className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-accent" aria-label="Скопировать"><IconCopy className="w-4 h-4" /></button>
+        <button onClick={onEdit} className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-accent" aria-label="Изменить"><IconPencil className="w-4 h-4" /></button>
+        <button onClick={onDelete} className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-danger" aria-label="Удалить"><IconTrash className="w-4 h-4" /></button>
       </div>
     </div>
   );

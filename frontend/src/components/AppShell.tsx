@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import { haptic } from '../haptic';
 import {
-  IconClock, IconUsers, IconWallet, IconChart, IconChevDown, IconUser, IconLogout,
+  IconClock, IconUsers, IconWallet, IconChart, IconChevDown, IconUser, IconLogout, IconSettings,
   type IconProps,
 } from './icons';
 
@@ -55,6 +55,14 @@ export default function AppShell() {
                   >
                     <IconUser className="w-4 h-4 text-text-3" /> Профиль
                   </button>
+                  {user?.role === 'supervisor' && (
+                    <button
+                      onClick={() => { setMenuOpen(false); navigate('/settings'); }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm hover:bg-bg-3 border-t border-border"
+                    >
+                      <IconSettings className="w-4 h-4 text-text-3" /> Настройки
+                    </button>
+                  )}
                   <button
                     onClick={() => { setMenuOpen(false); logout(); }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-sm text-danger hover:bg-bg-3 border-t border-border"

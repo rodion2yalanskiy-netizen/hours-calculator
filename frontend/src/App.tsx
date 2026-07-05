@@ -9,6 +9,7 @@ import TeamMemberPage from './pages/TeamMemberPage';
 import PayoutsPage from './pages/PayoutsPage';
 import PayoutReceiptCapture from './pages/PayoutReceiptCapture';
 import SummaryPage from './pages/SummaryPage';
+import SettingsPage from './pages/SettingsPage';
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
           <Route element={<ProtectedRoute requireRole="supervisor" />}>
             <Route path="/team" element={<TeamPage />} />
             <Route path="/team/:userId" element={<TeamMemberPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
           </Route>
         </Route>
       </Route>

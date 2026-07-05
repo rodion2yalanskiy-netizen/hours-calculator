@@ -69,3 +69,47 @@ export function fmtCardDate(dateISO: string): string {
 export function fmtRangeAmPm(startMin: number, endMin: number): string {
   return `${minutesToAmPm(startMin)} – ${minutesToAmPm(endMin)}`;
 }
+
+/** Минуты → 12-часовой формат БЕЗ AM/PM, часы всегда 2 цифры: 480→"08:00", 870→"02:30", 1020→"05:00", 720→"12:00", 0→"12:00". */
+export function to12h(min: number): string {
+  const h24 = Math.floor(min / 60) % 24;
+  const m = ((min % 60) + 60) % 60;
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${pad2(h12)}:${pad2(m)}`;
+}
+
+/** Часы с запятой без "ч": 6.5→"6,5", 8→"8". */
+export function hoursComma(h: number): string {
+  return Number.isInteger(h) ? String(h) : String(h).replace('.', ',');
+}
+
+// ── Отчёты для копирования (Слой 7a, точный формат от Родиона) ──────────────────
+interface ReportShift {
+  date: string; object_name: string;
+  start_min: number | null; end_min: number | null; calculated_hours: number;
+}
+
+/** Дневной отчёт (3 строки):
+ *  Пятница 3 июля
+ *  Объект Ванкувер 137 Женя
+ *  С 08:00 - 02:30 = 6,5ч
+ */
+export function formatDayReport(s: ReportShift): string {
+  const dt = parseISO(s.date);
+  const lines = [
+    `${RU_DAYS_FULL[dt.getDay()]} ${dt.getDate()} ${RU_MONTHS_GEN[dt.getMonth()]}`,
+    `Объект ${s.object_name}`,
+  ];
+  if (s.start_min != null && s.end_min != null) {
+    lines.push(`С ${to12h(s.start_min)} - ${to12h(s.end_min)} = ${hoursComma(s.calculated_hours)}ч`);
+  }
+  return lines.join('\n');
+}
+
+/** Недельный отчёт: блоки дней через пустую строку + "Итог: X,Yч". */
+export function formatWeekReport(shifts: ReportShift[]): string {
+  const sorted = [...shifts].sort((a, b) => a.date.localeCompare(b.date));
+  const blocks = sorted.map(formatDayReport).join('\n\n');
+  const total = sorted.reduce((a, s) => a + (s.calculated_hours || 0), 0);
+  return `${blocks}\n\nИтог: ${hoursComma(total)}ч`;
+}

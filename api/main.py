@@ -196,11 +196,15 @@ class ShiftCreate(BaseModel):
 
 
 def _resolve_hours(start_min: int, end_min: int, has_lunch: bool, provided: float | None) -> float:
-    """Часы из preview_shift; при выборе округления (15–20 мин) берём provided, иначе округление вверх."""
+    """Часы из preview_shift. При выборе округления (15–20 мин) принимаем клиентский
+    provided ТОЛЬКО если он равен одному из двух валидных значений (иначе — манипуляция
+    зарплатой). По умолчанию округляем вверх."""
     r = calc.preview_shift(start_min, end_min, has_lunch)["round"]
     if not r["needs_round_choice"]:
         return float(r["hours"])
-    return float(provided) if provided is not None else float(r["hours_up"])
+    if provided is not None and float(provided) in (float(r["hours_down"]), float(r["hours_up"])):
+        return float(provided)
+    return float(r["hours_up"])
 
 
 @app.post("/shifts/preview")
@@ -275,8 +279,10 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
         _min_to_time(body.start_min), _min_to_time(body.end_min), hours_val, rate, lunch_skipped,
     )
 
+    # suppress_notification honor'им ТОЛЬКО у supervisor'а (worker не может заглушить алерт о себе).
+    suppress = body.suppress_notification and user.role == "supervisor"
     # Обед не вычтен + создаёт РАБОТНИК (не supervisor) + не заглушено → push supervisor'у (не блокируя ответ).
-    if lunch_skipped and not body.suppress_notification and user.role == "worker":
+    if lunch_skipped and not suppress and user.role == "worker":
         asyncio.create_task(_notify_lunch_skipped(user.id, user.full_name, worker_id, d, object_name))
 
     hours = float(shift["calculated_hours"])
@@ -427,6 +433,12 @@ async def update_shift(shift_id: int, body: ShiftPatch, user=Depends(require_aut
         "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
         *args,
     )
+
+    # Слой 7e (fix): работник снял обед при правке (false→true) → тоже алертим supervisor'а.
+    if user.role == "worker" and not shift["lunch_skipped"] and row["lunch_skipped"]:
+        asyncio.create_task(_notify_lunch_skipped(
+            user.id, user.full_name, row["worker_id"], row["date"], row["object_name"]))
+
     hours = float(row["calculated_hours"]) if row["calculated_hours"] is not None else 0.0
     rate = float(row["hourly_rate_snapshot"]) if row["hourly_rate_snapshot"] is not None else 0.0
     return {

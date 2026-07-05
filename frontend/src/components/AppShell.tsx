@@ -98,8 +98,9 @@ export default function AppShell() {
           </nav>
         </aside>
 
-        {/* Контент */}
-        <main className="flex-1 w-full max-w-md mx-auto px-4 pt-6 pb-28 md:pb-8">
+        {/* Контент (гориз. safe-area для notch в ландшафте, минимум 16px) */}
+        <main className="flex-1 w-full max-w-md mx-auto px-4 pt-6 pb-28 md:pb-8"
+          style={{ paddingLeft: 'max(1rem, env(safe-area-inset-left))', paddingRight: 'max(1rem, env(safe-area-inset-right))' }}>
           <Outlet />
         </main>
       </div>

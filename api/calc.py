@@ -6,7 +6,8 @@
 """
 
 LUNCH_MIN = 30
-RATE = 25
+# 7g: RATE/money удалены — деньги считаются ТОЛЬКО через hourly_rate_snapshot
+# (logic.money(hours, snapshot)). Плоская ставка была футганом (аудит 🟡-10).
 
 
 def _round_half_hour(net_min):
@@ -36,7 +37,3 @@ def preview_shift(start_min, end_min, has_lunch=True):
         "lunch_deducted": has_lunch,
         "round": _round_half_hour(net),
     }
-
-
-def money(hours):
-    return round(hours * RATE, 2)

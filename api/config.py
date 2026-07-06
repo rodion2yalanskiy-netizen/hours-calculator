@@ -15,6 +15,7 @@ JWT_SECRET = os.getenv("JWT_SECRET", "")                       # секрет п
 
 # ── Слой 6: фото-чеки (Gemini Vision + Railway Volume) ───────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")   # ключ Gemini Vision (распознавание чеков)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")  # 7g: модель в env (сменить без редеплоя при бане/квоте)
 DATA_DIR = os.getenv("DATA_DIR", "/data")          # смонтированный Railway Volume для файлов чеков
 
 # ── Слой 7b: web push (VAPID) + субботние напоминания ────────────────────────

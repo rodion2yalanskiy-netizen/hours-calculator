@@ -19,13 +19,14 @@ try:
 except Exception:  # noqa: BLE001 — если плагин не встал, HEIC не поддержим, но не падаем
     _HEIF_OK = False
 
-from config import GEMINI_API_KEY
+from config import GEMINI_API_KEY, GEMINI_MODEL
 
 logger = logging.getLogger("gemini")
 
 _MODEL = None
-_MODEL_NAME = "gemini-2.0-flash"
+_MODEL_NAME = GEMINI_MODEL  # 7g: из env (GEMINI_MODEL), дефолт gemini-2.0-flash
 _MAX_SIDE = 1600  # ужимаем большие фото для скорости/токенов
+_GEMINI_TIMEOUT = 15  # сек: без таймаута зависший вызов держал бы поток пула (аудит 🔴-2)
 
 PROMPT = """
 Ты — помощник для распознавания чеков и подтверждений оплаты строительной бригады маляров.
@@ -81,10 +82,13 @@ def to_jpeg(image_bytes: bytes, mime_type: str) -> bytes:
 
 
 def _recognize_sync(jpeg_bytes: bytes) -> dict:
-    response = _get_model().generate_content([
-        PROMPT,
-        {"mime_type": "image/jpeg", "data": jpeg_bytes},
-    ])
+    response = _get_model().generate_content(
+        [
+            PROMPT,
+            {"mime_type": "image/jpeg", "data": jpeg_bytes},
+        ],
+        request_options={"timeout": _GEMINI_TIMEOUT},  # 7g: таймаут, чтобы upload не висел
+    )
     raw_text = (response.text or "").strip()
     if raw_text.startswith("```"):
         parts = raw_text.split("```")
@@ -106,8 +110,13 @@ async def recognize_receipt(jpeg_bytes: bytes, mime_type: str = "image/jpeg") ->
     """Распознать чек (принимает УЖЕ JPEG-байты). При любой ошибке — is_receipt=False,
     но реальная причина логируется (logging.error), а не проглатывается молча."""
     try:
-        return await asyncio.to_thread(_recognize_sync, jpeg_bytes)
-    except Exception as e:  # noqa: BLE001
+        # wait_for — страховка поверх request_options: даже если поток зависнет,
+        # запрос вернётся (деградация в pending_review), а не будет висеть вечно.
+        return await asyncio.wait_for(
+            asyncio.to_thread(_recognize_sync, jpeg_bytes),
+            timeout=_GEMINI_TIMEOUT + 5,
+        )
+    except Exception as e:  # noqa: BLE001 — включая asyncio.TimeoutError
         logger.error("Gemini recognize failed: %s", e, exc_info=True)
         return {
             "is_receipt": False,

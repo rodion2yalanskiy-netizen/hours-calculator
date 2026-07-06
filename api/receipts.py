@@ -15,7 +15,7 @@ import pathlib
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -62,17 +62,32 @@ def _clean_amount(value) -> float | None:
 
 
 @router.post("/upload")
-async def upload_receipt(file: UploadFile = File(...), current: CurrentUser = Depends(require_auth)):
+async def upload_receipt(
+    request: Request,
+    file: UploadFile = File(...),
+    current: CurrentUser = Depends(require_auth),
+):
     worker_id = _own_worker_id(current)
     mime = (file.content_type or "").lower()
     if mime not in _ALLOWED_MIME:
         raise HTTPException(status_code=400, detail="unsupported file type (jpeg/png/webp/heic only)")
 
-    data = await file.read()
+    # 7g: ранний отсев по Content-Length (аудит 🟡-2), чтобы не тянуть гигантское тело.
+    clen = request.headers.get("content-length")
+    if clen and clen.isdigit() and int(clen) > MAX_SIZE + 8192:  # +overhead multipart
+        raise HTTPException(status_code=413, detail="Файл слишком большой (макс 5 МБ)")
+
+    # Читаем чанками с обрывом при превышении — память ограничена ~MAX_SIZE, а не размером тела.
+    data = b""
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        data += chunk
+        if len(data) > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="Файл слишком большой (макс 5 МБ)")
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
-    if len(data) > MAX_SIZE:
-        raise HTTPException(status_code=400, detail="file too large (max 5 MB)")
 
     # Нормализуем в JPEG (в т.ч. HEIC→JPEG, ужатие до 1600px). Это же и проверка,
     # что файл — реальное изображение: если не открылось, значит не картинка.

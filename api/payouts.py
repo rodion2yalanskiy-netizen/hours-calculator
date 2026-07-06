@@ -200,7 +200,10 @@ async def create_payout_from_receipt(body: PayoutFromReceipt, current: CurrentUs
                     worker_id, ws, we, body.confirmed_amount, body.shortfall_reason,
                     body.shortfall_note, body.receipt_id,
                 )
-    except asyncpg.UniqueViolationError:
+    except asyncpg.UniqueViolationError as e:
+        # 7g: различаем нарушение по чеку и по неделе (аудит 🟡-1).
+        if e.constraint_name == "uq_payout_receipt":
+            raise HTTPException(status_code=409, detail="Этот чек уже привязан к другой выплате")
         raise HTTPException(status_code=409, detail="payout for this week already exists")
 
     # 7f: работник прикрепил чек → push supervisor'у (себе не шлём).

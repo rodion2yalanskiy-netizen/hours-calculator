@@ -11,9 +11,11 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import date as date_cls, time
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Response
+import asyncpg
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from deps import require_auth, require_supervisor
 from auth import router as auth_router
@@ -76,6 +78,20 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=False,  # JWT идёт в заголовке Authorization, cookie-креды не нужны
 )
+
+import logging as _logging
+
+_log = _logging.getLogger("api")
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """7g: любая необработанная ошибка (сбой БД, пул и т.п.) → чистый JSON без трейса.
+    HTTPException/валидация обрабатываются штатными хендлерами FastAPI и сюда не попадают.
+    Трейс — только в лог сервера."""
+    _log.error("Unhandled error on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": "Временная ошибка, попробуйте ещё раз"})
+
 
 # Роутеры: аутентификация + команда + выплаты + сводки.
 app.include_router(auth_router)
@@ -177,9 +193,13 @@ async def patch_worker(worker_id: int, body: WorkerPatch, user=Depends(require_s
 
 
 # ── Смены (shifts) ────────────────────────────────────────────────────────────
+# 7g: минуты от полуночи ограничены [0,1439] — иначе работник мог внести ~999ч (аудит 🔴-3).
+MAX_NET_HOURS = 20.0  # разумный предел длительности одной смены (нетто, после обеда)
+
+
 class PreviewBody(BaseModel):
-    start_min: int
-    end_min: int
+    start_min: int = Field(ge=0, le=1439)
+    end_min: int = Field(ge=0, le=1439)
     worker_id: int | None = None
     has_lunch: bool = True  # Слой 7e: явная галочка обеда
 
@@ -188,8 +208,8 @@ class ShiftCreate(BaseModel):
     worker_id: int
     date: str
     object_name: str
-    start_min: int
-    end_min: int
+    start_min: int = Field(ge=0, le=1439)
+    end_min: int = Field(ge=0, le=1439)
     hours: float | None = None       # опц.: фронт присылает финал при выборе округления (15–20 мин)
     has_lunch: bool = True            # Слой 7e: True → вычесть 30 мин обеда
     suppress_notification: bool = False  # supervisor при заносе задним числом — не слать push
@@ -283,18 +303,37 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
             raise HTTPException(status_code=400, detail="rate_override must be > 0")
         rate = float(body.rate_override)
     hours_val = _resolve_hours(body.start_min, body.end_min, body.has_lunch, body.hours)
+    # 7g: разумный потолок длительности смены (аудит 🔴-3) — ловит опечатки/накрутку.
+    if hours_val > MAX_NET_HOURS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Слишком длинная смена ({hours_val:g}ч). Максимум {MAX_NET_HOURS:g}ч — проверьте время.",
+        )
     lunch_skipped = not body.has_lunch
 
-    shift = await db.fetchrow(
-        "INSERT INTO shifts "
-        "(user_id, worker_id, date, day_of_week, object_name, start_time, end_time, "
-        " calculated_hours, hourly_rate_snapshot, lunch_skipped) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
-        "RETURNING id, date, day_of_week, object_name, worker_id, calculated_hours, "
-        "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
-        user.id, worker_id, d, day_of_week, object_name,
-        _min_to_time(body.start_min), _min_to_time(body.end_min), hours_val, rate, lunch_skipped,
-    )
+    # 7g: дубль (двойной тап) отсекается UNIQUE-индексом uq_shift_dedup → возвращаем
+    # существующую смену идемпотентно (не пугаем работника ошибкой).
+    try:
+        shift = await db.fetchrow(
+            "INSERT INTO shifts "
+            "(user_id, worker_id, date, day_of_week, object_name, start_time, end_time, "
+            " calculated_hours, hourly_rate_snapshot, lunch_skipped) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
+            "RETURNING id, date, day_of_week, object_name, worker_id, calculated_hours, "
+            "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
+            user.id, worker_id, d, day_of_week, object_name,
+            _min_to_time(body.start_min), _min_to_time(body.end_min), hours_val, rate, lunch_skipped,
+        )
+    except asyncpg.UniqueViolationError:
+        existing = await db.fetchrow(
+            "SELECT id, date, day_of_week, object_name, worker_id, calculated_hours, "
+            "       start_time, end_time, hourly_rate_snapshot, lunch_skipped "
+            "FROM shifts WHERE worker_id=$1 AND date=$2 AND start_time=$3 AND end_time=$4 AND object_name=$5",
+            worker_id, d, _min_to_time(body.start_min), _min_to_time(body.end_min), object_name,
+        )
+        if existing is not None:
+            return _shift_response(existing, not existing["lunch_skipped"])
+        raise  # редкий гонок по другому ограничению — пробрасываем
 
     # suppress_notification honor'им ТОЛЬКО у supervisor'а (worker не может заглушить алерт о себе).
     suppress = body.suppress_notification and user.role == "supervisor"
@@ -305,19 +344,24 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
             user.id, user.full_name, worker_id, d, object_name, hours_val, lunch_skipped,
         ))
 
-    hours = float(shift["calculated_hours"])
-    snapshot = float(shift["hourly_rate_snapshot"])
+    return _shift_response(shift, body.has_lunch)
+
+
+def _shift_response(row, lunch_deducted: bool) -> dict:
+    """Единый формат ответа по смене (create/idempotent-existing)."""
+    hours = float(row["calculated_hours"])
+    snapshot = float(row["hourly_rate_snapshot"])
     return {
-        "id": shift["id"],
-        "worker_id": shift["worker_id"],
-        "date": shift["date"].isoformat(),
-        "day_of_week": shift["day_of_week"],
-        "object_name": shift["object_name"],
-        "start_time": _hhmm(shift["start_time"]),
-        "end_time": _hhmm(shift["end_time"]),
+        "id": row["id"],
+        "worker_id": row["worker_id"],
+        "date": row["date"].isoformat(),
+        "day_of_week": row["day_of_week"],
+        "object_name": row["object_name"],
+        "start_time": _hhmm(row["start_time"]),
+        "end_time": _hhmm(row["end_time"]),
         "calculated_hours": hours,
-        "lunch_deducted": body.has_lunch,
-        "lunch_skipped": shift["lunch_skipped"],
+        "lunch_deducted": lunch_deducted,
+        "lunch_skipped": row["lunch_skipped"],
         "hourly_rate": snapshot,
         "money": logic.money(hours, snapshot),  # приоритет — snapshot, не фиксированная ставка
     }
@@ -376,9 +420,9 @@ async def list_shifts(
 class ShiftPatch(BaseModel):
     date: str | None = None
     object_name: str | None = None
-    start_min: int | None = None
-    end_min: int | None = None
-    hours: float | None = None
+    start_min: int | None = Field(default=None, ge=0, le=1439)  # 7g: границы времени
+    end_min: int | None = Field(default=None, ge=0, le=1439)
+    hours: float | None = Field(default=None, ge=0, le=MAX_NET_HOURS)  # 7g: прямой ввод часов тоже в границах
     has_lunch: bool | None = None  # Слой 7e
 
 
@@ -434,6 +478,11 @@ async def update_shift(shift_id: int, body: ShiftPatch, user=Depends(require_aut
         eff_has_lunch = body.has_lunch if body.has_lunch is not None else (not shift["lunch_skipped"])
         if eff_start is not None and eff_end is not None:
             new_hours = _resolve_hours(eff_start, eff_end, eff_has_lunch, body.hours)
+            if new_hours > MAX_NET_HOURS:  # 7g: тот же потолок, что и при создании
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Слишком длинная смена ({new_hours:g}ч). Максимум {MAX_NET_HOURS:g}ч.",
+                )
             sets.append(f"calculated_hours=${len(args) + 1}")
             args.append(new_hours)
         elif body.hours is not None:
@@ -447,12 +496,16 @@ async def update_shift(shift_id: int, body: ShiftPatch, user=Depends(require_aut
     sets.append("updated_at=now()")
     args.append(shift_id)
 
-    row = await db.fetchrow(
-        f"UPDATE shifts SET {', '.join(sets)} WHERE id=${len(args)} "
-        "RETURNING id, date, day_of_week, object_name, worker_id, calculated_hours, "
-        "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
-        *args,
-    )
+    try:
+        row = await db.fetchrow(
+            f"UPDATE shifts SET {', '.join(sets)} WHERE id=${len(args)} "
+            "RETURNING id, date, day_of_week, object_name, worker_id, calculated_hours, "
+            "          start_time, end_time, hourly_rate_snapshot, lunch_skipped",
+            *args,
+        )
+    except asyncpg.UniqueViolationError:
+        # 7g: правка сделала бы смену дублем другой существующей.
+        raise HTTPException(status_code=409, detail="Такая смена уже есть в этот день")
 
     # Слой 7e (fix): работник снял обед при правке (false→true) → тоже алертим supervisor'а.
     if user.role == "worker" and not shift["lunch_skipped"] and row["lunch_skipped"]:

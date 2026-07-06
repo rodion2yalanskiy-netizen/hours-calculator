@@ -24,6 +24,9 @@ from config import SUBSCRIBER_TIMEZONE, OWNER_ID
 scheduler = AsyncIOScheduler(timezone="UTC")
 
 _REMINDER_HOURS = {19, 20, 21, 22}
+# 7g: если сервис вдруг масштабируют >1 реплики — advisory-lock гарантирует, что
+# рассылку выполнит ровно ОДИН процесс (аудит 🟡-3). Отдельный ключ от миграционного.
+_SCHED_LOCK_KEY = 4920216
 
 
 async def check_hourly_reminders() -> None:
@@ -34,6 +37,20 @@ async def check_hourly_reminders() -> None:
     now = datetime.now(tz)
     if now.hour not in _REMINDER_HOURS:
         return
+
+    # Только один процесс шлёт: берём advisory-lock; не взяли → другой уже рассылает.
+    pool = await db.get_pool()
+    async with pool.acquire() as lock_conn:
+        got = await lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", _SCHED_LOCK_KEY)
+        if not got:
+            return
+        try:
+            await _send_reminders(now)
+        finally:
+            await lock_conn.execute("SELECT pg_advisory_unlock($1)", _SCHED_LOCK_KEY)
+
+
+async def _send_reminders(now) -> None:
     today = now.date()
     hh = f"{now.hour:02d}:00"
 

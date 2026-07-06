@@ -193,6 +193,7 @@ class ShiftCreate(BaseModel):
     hours: float | None = None       # опц.: фронт присылает финал при выборе округления (15–20 мин)
     has_lunch: bool = True            # Слой 7e: True → вычесть 30 мин обеда
     suppress_notification: bool = False  # supervisor при заносе задним числом — не слать push
+    rate_override: float | None = None   # ТОЛЬКО supervisor: явная ставка snapshot (занос старых смен)
 
 
 def _resolve_hours(start_min: int, end_min: int, has_lunch: bool, provided: float | None) -> float:
@@ -265,6 +266,11 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
 
     # Реальная ставка на момент смены (snapshot) — передаём явно.
     rate = await logic.resolve_hourly_rate(worker_id, user.id, user.hourly_rate)
+    # Явная ставка — ТОЛЬКО supervisor (worker не может накрутить себе ставку).
+    if body.rate_override is not None and user.role == "supervisor":
+        if body.rate_override <= 0:
+            raise HTTPException(status_code=400, detail="rate_override must be > 0")
+        rate = float(body.rate_override)
     hours_val = _resolve_hours(body.start_min, body.end_min, body.has_lunch, body.hours)
     lunch_skipped = not body.has_lunch
 

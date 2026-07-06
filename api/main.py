@@ -389,8 +389,10 @@ async def list_shifts(
 
     rows = await db.fetch(
         "SELECT s.id, s.date, s.day_of_week, s.object_name, s.worker_id, s.calculated_hours, "
-        "       s.start_time, s.end_time, s.hourly_rate_snapshot, s.lunch_skipped, w.name AS worker_name "
+        "       s.start_time, s.end_time, s.hourly_rate_snapshot, s.lunch_skipped, w.name AS worker_name, "
+        "       ps.payout_id "  # Слой 8: входит ли смена в выплату
         "FROM shifts s LEFT JOIN workers w ON w.id = s.worker_id "
+        "LEFT JOIN payout_shifts ps ON ps.shift_id = s.id "
         f"WHERE {where} "
         "ORDER BY s.date",
         *args,
@@ -412,6 +414,58 @@ async def list_shifts(
             "hourly_rate": rate,
             "lunch_skipped": r["lunch_skipped"],
             "money": logic.money(hours, rate),
+            "is_paid": r["payout_id"] is not None,  # Слой 8
+            "payout_id": str(r["payout_id"]) if r["payout_id"] else None,
+        })
+    return result
+
+
+@app.get("/shifts/unpaid")
+async def list_unpaid_shifts(
+    worker_id: int | None = Query(default=None),
+    user=Depends(require_auth),
+):
+    """Слой 8: смены работника, ещё не входящие ни в одну выплату — для выбора при
+    создании нового чека. worker → только свои; supervisor → команды (или конкретного)."""
+    args = []
+    if user.role == "worker":
+        if user.worker_id is None:
+            return []
+        args.extend([user.id, user.worker_id])
+        where = "s.user_id=$1 AND s.worker_id=$2"
+    else:
+        args.append(user.id)
+        where = "w.user_id=$1"
+        if worker_id is not None:
+            args.append(worker_id)
+            where += f" AND s.worker_id=${len(args)}"
+
+    rows = await db.fetch(
+        "SELECT s.id, s.date, s.day_of_week, s.object_name, s.worker_id, s.calculated_hours, "
+        "       s.start_time, s.end_time, s.hourly_rate_snapshot, s.lunch_skipped, w.name AS worker_name "
+        "FROM shifts s LEFT JOIN workers w ON w.id = s.worker_id "
+        f"WHERE {where} AND NOT EXISTS (SELECT 1 FROM payout_shifts ps WHERE ps.shift_id = s.id) "
+        "ORDER BY s.date",
+        *args,
+    )
+    result = []
+    for r in rows:
+        hours = float(r["calculated_hours"]) if r["calculated_hours"] is not None else 0.0
+        rate = float(r["hourly_rate_snapshot"]) if r["hourly_rate_snapshot"] is not None else 0.0
+        result.append({
+            "id": r["id"],
+            "date": r["date"].isoformat(),
+            "day_of_week": r["day_of_week"],
+            "object_name": r["object_name"],
+            "worker_id": r["worker_id"],
+            "worker_name": r["worker_name"],
+            "calculated_hours": hours,
+            "start_min": _time_to_min(r["start_time"]),
+            "end_min": _time_to_min(r["end_time"]),
+            "hourly_rate": rate,
+            "lunch_skipped": r["lunch_skipped"],
+            "money": logic.money(hours, rate),
+            "week_start": logic.monday_of(r["date"]).isoformat(),  # для группировки на фронте
         })
     return result
 

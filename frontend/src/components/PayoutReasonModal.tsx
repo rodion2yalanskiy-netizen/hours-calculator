@@ -43,7 +43,7 @@ export default function PayoutReasonModal({ payout, onClose, onSaved }: {
     <div className="fixed inset-0 z-40 bg-black/60 flex md:items-center md:justify-center" onClick={onClose}>
       <div className="bg-bg-2 border border-border w-full h-full overflow-y-auto md:h-auto md:max-w-[480px] md:rounded-2xl p-5" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold">Выплата за {formatWeekLabel(payout.week_start, payout.week_end)}</h2>
+          <h2 className="text-lg font-bold">{payout.week_start && payout.week_end ? `Выплата за ${formatWeekLabel(payout.week_start, payout.week_end)}` : 'Выплата'}</h2>
           <button onClick={onClose} className="text-text-muted text-2xl leading-none">×</button>
         </div>
 

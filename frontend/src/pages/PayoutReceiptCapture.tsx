@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import {
-  uploadReceipt, createPayoutFromReceipt, deleteReceipt, getSummaryWeekly,
-  type ReceiptUploadResponse, type WeeklySummary,
+  getUnpaidShifts, uploadReceipt, createPayout, createPayoutFromReceipt, deleteReceipt,
+  type UnpaidShift, type ReceiptUploadResponse,
 } from '../api';
 import { formatWeekLabel } from '../lib/weeks';
 import { fmtUSD, fmtHours } from '../format';
@@ -11,78 +11,99 @@ import { haptic } from '../haptic';
 import { IconCheckCircle, IconCoins, IconAlertTriangle } from '../components/icons';
 
 const pad = (n: number) => String(n).padStart(2, '0');
-const isoOf = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 function weekEndOf(weekStart: string): string {
   const [y, m, d] = weekStart.split('-').map(Number);
-  return isoOf(new Date(y, m - 1, d + 6));
+  const e = new Date(y, m - 1, d + 6);
+  return `${e.getFullYear()}-${pad(e.getMonth() + 1)}-${pad(e.getDate())}`;
 }
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
-type Step = 'capture' | 'uploading' | 'result' | 'saving' | 'saved';
+type Step = 'select' | 'receipt' | 'uploading' | 'confirm' | 'saving' | 'saved';
 
+/** Слой 8: создание выплаты по выбранным сменам (можно из разных недель) + чек. */
 export default function PayoutReceiptCapture() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [params] = useSearchParams();
-  const weekStart = params.get('week_start') ?? '';
-  const weekEnd = useMemo(() => (weekStart ? weekEndOf(weekStart) : ''), [weekStart]);
   const workerId = user?.worker_id ?? undefined;
 
-  const [summary, setSummary] = useState<WeeklySummary | null>(null);
-  const [step, setStep] = useState<Step>('capture');
+  const [shifts, setShifts] = useState<UnpaidShift[]>([]);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [step, setStep] = useState<Step>('select');
   const [uploaded, setUploaded] = useState<ReceiptUploadResponse | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState<'debt' | 'fine' | null>(null);
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [fileSizeMb, setFileSizeMb] = useState(0);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!weekStart || workerId == null) return;
-    getSummaryWeekly(weekStart, workerId).then(setSummary).catch(() => setSummary(null));
-  }, [weekStart, workerId]);
+    getUnpaidShifts(workerId)
+      .then((s) => setShifts(s))
+      .catch(() => setShifts([]))
+      .finally(() => setLoading(false));
+  }, [workerId]);
 
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
 
-  const earned = summary?.earned_by_hours ?? 0;
-  const hours = summary?.total_hours ?? 0;
-  const rate = hours > 0 ? Math.round((earned / hours) * 100) / 100 : (user?.hourly_rate ?? 0);
+  // Группировка неоплаченных смен по неделям (Пн-Вс), свежие сверху.
+  const groups = useMemo(() => {
+    const map = new Map<string, UnpaidShift[]>();
+    for (const s of shifts) {
+      const arr = map.get(s.week_start) ?? [];
+      arr.push(s);
+      map.set(s.week_start, arr);
+    }
+    return [...map.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  }, [shifts]);
+
+  const selectedShifts = useMemo(() => shifts.filter((s) => selected.has(s.id)), [shifts, selected]);
+  const earned = round2(selectedShifts.reduce((a, s) => a + s.money, 0));
+  const totalHours = round2(selectedShifts.reduce((a, s) => a + s.calculated_hours, 0));
 
   const amountNum = parseFloat(amount);
   const hasAmount = Number.isFinite(amountNum) && amountNum >= 0;
-  const am = hasAmount ? Math.round(amountNum * 100) / 100 : 0;
-  const bonus = hasAmount ? Math.round((am - earned) * 100) / 100 : 0;
-  const shortfall = hasAmount ? Math.round((earned - am) * 100) / 100 : 0;
+  const am = hasAmount ? round2(amountNum) : 0;
+  const bonus = hasAmount ? round2(am - earned) : 0;
+  const shortfall = hasAmount ? round2(earned - am) : 0;
   const noteOk = reason !== 'fine' || note.trim().length >= 5;
-  const canConfirm = hasAmount && (shortfall <= 0 || (!!reason && noteOk));
+  const canConfirm = hasAmount && selected.size > 0 && (shortfall <= 0 || (!!reason && noteOk));
 
-  const onPick = async (e: ChangeEvent<HTMLInputElement>) => {
+  const toggle = (id: number) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+  const toggleWeek = (wk: UnpaidShift[]) => setSelected((prev) => {
+    const next = new Set(prev);
+    const allSel = wk.every((s) => next.has(s.id));
+    wk.forEach((s) => (allSel ? next.delete(s.id) : next.add(s.id)));
+    return next;
+  });
+
+  const onPickReceipt = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setError(null);
-    setFileSizeMb(file.size / (1024 * 1024));
     if (preview) URL.revokeObjectURL(preview);
     setPreview(URL.createObjectURL(file));
     setStep('uploading');
     try {
       const res = await uploadReceipt(file);
       setUploaded(res);
-      setAmount(res.recognized_amount != null ? String(res.recognized_amount) : '');
-      setReason(null); setNote('');
-      setStep('result');
+      setAmount(res.recognized_amount != null ? String(res.recognized_amount) : (earned ? String(earned) : ''));
+      setStep('confirm');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить фото');
-      setStep('capture');
+      setStep('receipt');
     }
   };
 
-  const retry = async () => {
-    if (uploaded) { try { await deleteReceipt(uploaded.receipt_id); } catch { /* уже нет */ } }
-    setUploaded(null); setAmount(''); setError(null);
-    if (preview) { URL.revokeObjectURL(preview); setPreview(null); }
-    setStep('capture');
-    fileRef.current?.click();
+  const skipReceipt = () => {
+    setUploaded(null);
+    setAmount(earned ? String(earned) : '');
+    setStep('confirm');
   };
 
   const cancel = async () => {
@@ -91,93 +112,133 @@ export default function PayoutReceiptCapture() {
   };
 
   const confirm = async () => {
-    if (!uploaded || !canConfirm) return;
+    if (!canConfirm) return;
     setStep('saving'); setError(null);
+    const shift_ids = [...selected];
+    const shortfallExtra = shortfall > 0
+      ? { shortfall_reason: reason as 'debt' | 'fine', ...(note.trim() ? { shortfall_note: note.trim() } : {}) }
+      : {};
     try {
-      await createPayoutFromReceipt({
-        receipt_id: uploaded.receipt_id,
-        week_start: weekStart, week_end: weekEnd,
-        confirmed_amount: am,
-        ...(shortfall > 0 ? { shortfall_reason: reason as 'debt' | 'fine' } : {}),
-        ...(shortfall > 0 && note.trim() ? { shortfall_note: note.trim() } : {}),
-      });
+      if (uploaded) {
+        await createPayoutFromReceipt({ receipt_id: uploaded.receipt_id, shift_ids, confirmed_amount: am, ...shortfallExtra });
+      } else {
+        await createPayout({ shift_ids, amount_paid: am, ...shortfallExtra });
+      }
       haptic('success');
       setStep('saved');
       window.setTimeout(() => navigate('/payouts'), 900);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить');
-      setStep('result');
+      setStep('confirm');
     }
   };
-
-  if (!weekStart) {
-    return <div className="text-center py-16"><p className="text-text-muted mb-4">Неделя не указана.</p>
-      <button onClick={() => navigate('/payouts')} className="rounded-xl px-4 py-2 bg-bg-3">← К выплатам</button></div>;
-  }
-
-  // 7f: экран не блокирует. Как только фото загружено — всегда даём вписать сумму вручную.
-  const showForm = uploaded && (step === 'result' || step === 'saving' || step === 'saved');
-  const notRecognized = uploaded && !uploaded.is_receipt_confirmed;
-  const amountUnread = uploaded && uploaded.is_receipt_confirmed && uploaded.recognized_amount == null;
 
   return (
     <div className="relative">
       <button onClick={cancel} className="text-text-muted text-sm mb-4">← Отменить</button>
-      <h1 className="text-2xl font-bold mb-4">Внести чек</h1>
+      <h1 className="text-2xl font-bold mb-1">Новая выплата</h1>
+      <p className="text-text-muted text-sm mb-4">Выберите смены, которые покрывает один чек — можно из разных недель.</p>
 
-      {/* Справка по неделе */}
-      <div className="bg-bg-2 border border-border rounded-2xl p-4 mb-4 text-sm">
-        <p className="font-semibold">{formatWeekLabel(weekStart, weekEnd)}</p>
-        <p className="text-text-muted mt-1">
-          Отработано: {fmtHours(hours)}{rate > 0 && ` × ${fmtUSD(rate)}`} = <span className="text-accent">{fmtUSD(earned)}</span>
-        </p>
-      </div>
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onPickReceipt} className="hidden" />
 
-      <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onPick} className="hidden" />
+      {/* Превью фото */}
+      {preview && (step === 'confirm' || step === 'saving' || step === 'saved') && (
+        <img src={preview} alt="Чек" className="w-full max-h-56 object-contain rounded-2xl border border-border mb-4 bg-bg-3" />
+      )}
 
-      {/* Шаг: съёмка */}
-      {step === 'capture' && (
-        <div className="text-center py-6">
+      {/* ── Шаг 1: выбор смен ── */}
+      {step === 'select' && (
+        <>
+          {loading ? (
+            <div className="space-y-3">{[0, 1, 2].map((i) => <div key={i} className="h-20 bg-bg-2 border border-border rounded-2xl animate-pulse" />)}</div>
+          ) : shifts.length === 0 ? (
+            <p className="text-text-muted text-sm text-center py-10">Нет неоплаченных смен. Все смены уже закрыты чеками.</p>
+          ) : (
+            <div className="space-y-4 pb-40">
+              {groups.map(([wk, list]) => {
+                const allSel = list.every((s) => selected.has(s.id));
+                return (
+                  <div key={wk} className="bg-bg-2 border border-border rounded-2xl p-3">
+                    <button onClick={() => toggleWeek(list)}
+                      className="w-full flex items-center justify-between text-sm font-semibold mb-2">
+                      <span>{formatWeekLabel(wk, weekEndOf(wk))}</span>
+                      <span className={`text-xs ${allSel ? 'text-accent' : 'text-text-muted'}`}>{allSel ? 'снять всё' : 'выбрать всё'}</span>
+                    </button>
+                    <div className="space-y-1.5">
+                      {list.map((s) => {
+                        const on = selected.has(s.id);
+                        return (
+                          <button key={s.id} onClick={() => toggle(s.id)}
+                            className={`w-full flex items-center gap-3 rounded-xl px-3 py-2 text-left border ${on ? 'bg-accent-dim border-accent' : 'bg-bg-3 border-border-2'}`}>
+                            <span className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 ${on ? 'bg-accent border-accent text-bg-2' : 'border-border-2'}`}>
+                              {on && '✓'}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-sm truncate">{s.date} · {s.object_name}</span>
+                              <span className="block text-text-muted text-xs">{fmtHours(s.calculated_hours)} · {fmtUSD(s.money)}{s.lunch_skipped ? ' · без обеда' : ''}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Плавающая панель итога */}
+          {shifts.length > 0 && (
+            <div className="fixed bottom-20 inset-x-0 px-4 z-20">
+              <div className="max-w-md mx-auto bg-bg-2 border border-border rounded-2xl p-3 shadow-lg">
+                <p className="text-sm text-text-muted mb-2">
+                  Выбрано <span className="text-text font-semibold">{selected.size}</span> смен · {fmtHours(totalHours)} · заработано <span className="text-accent font-semibold">{fmtUSD(earned)}</span>
+                </p>
+                <button onClick={() => setStep('receipt')} disabled={selected.size === 0}
+                  className={`w-full rounded-xl py-3 font-semibold ${selected.size ? 'bg-accent text-bg-2 hover:bg-accent-2' : 'bg-bg-3 text-text-muted'}`}>
+                  Далее → чек
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── Шаг 2: чек ── */}
+      {step === 'receipt' && (
+        <div className="space-y-4">
+          <div className="bg-bg-3 rounded-xl px-4 py-3 text-sm text-text-muted">
+            {selected.size} смен · {fmtHours(totalHours)} · заработано <span className="text-accent">{fmtUSD(earned)}</span>
+          </div>
           <button onClick={() => fileRef.current?.click()}
             className="w-full bg-accent text-bg-2 font-semibold rounded-2xl py-4 text-lg hover:bg-accent-2">
             📷 Сфотографировать чек
           </button>
-          <p className="text-text-muted text-xs mt-3">На телефоне откроется камера. Можно и выбрать фото из галереи.</p>
-          {error && <p className="text-danger text-sm mt-3">{error}</p>}
+          <button onClick={skipReceipt} className="w-full rounded-2xl py-3 bg-bg-3 text-text-muted">
+            Без чека — ввести сумму вручную
+          </button>
+          <button onClick={() => setStep('select')} className="w-full text-text-muted text-sm">← назад к выбору смен</button>
+          {error && <p className="text-danger text-sm">{error}</p>}
         </div>
       )}
 
-      {/* Шаг: загрузка */}
       {step === 'uploading' && (
         <div className="text-center py-10">
           <div className="w-8 h-8 mx-auto rounded-full border-2 border-border-2 border-t-accent animate-spin" />
-          <p className="text-text-muted text-sm mt-4">Загружаем фото{fileSizeMb > 1 ? ` (${fileSizeMb.toFixed(1)} МБ)` : ''} и распознаём…</p>
+          <p className="text-text-muted text-sm mt-4">Загружаем фото и распознаём…</p>
         </div>
       )}
 
-      {/* Превью фото */}
-      {preview && step !== 'capture' && step !== 'uploading' && (
-        <img src={preview} alt="Чек" className="w-full max-h-64 object-contain rounded-2xl border border-border mb-4 bg-bg-3" />
-      )}
-
-      {/* Форма: фото загружено → всегда даём вписать сумму (ИИ не блокирует, 7f). */}
-      {showForm && uploaded && (
+      {/* ── Шаг 3: подтверждение суммы ── */}
+      {(step === 'confirm' || step === 'saving' || step === 'saved') && (
         <div className="space-y-4">
-          {/* Мягкий баннер, если ИИ не распознал — не блокирует, просто предупреждает. */}
-          {notRecognized && (
+          {uploaded && !uploaded.is_receipt_confirmed && (
             <div className="bg-bg-2 border border-warning/40 rounded-2xl p-4">
               <p className="text-warning font-medium mb-1">ИИ не распознал чек автоматически</p>
-              <p className="text-text-muted text-sm">Ничего страшного — впишите сумму сами. Старший проверит фото вручную.{uploaded.notes ? ` (${uploaded.notes})` : ''}</p>
+              <p className="text-text-muted text-sm">Впишите сумму сами — старший проверит фото вручную.</p>
             </div>
           )}
-          {amountUnread && (
-            <div className="bg-bg-2 border border-warning/40 rounded-2xl p-4">
-              <p className="text-warning font-medium mb-1">Сумму не удалось прочитать</p>
-              <p className="text-text-muted text-sm">Впишите сумму вручную. Можно переснять для более чёткого фото.</p>
-            </div>
-          )}
-
-          {uploaded.recognized_amount != null && (
+          {uploaded?.recognized_amount != null && (
             <div className="bg-bg-3 border border-border rounded-xl p-4 text-center">
               <p className="text-text-muted text-xs">Распознано на чеке</p>
               <p className="text-3xl font-bold text-accent">{fmtUSD(uploaded.recognized_amount)}</p>
@@ -192,7 +253,7 @@ export default function PayoutReceiptCapture() {
           </label>
 
           <div className="bg-bg-3 rounded-xl px-4 py-2 text-sm text-text-muted">
-            Отработано: {fmtUSD(earned)}{uploaded.recognized_amount != null && ` · Распознано: ${fmtUSD(uploaded.recognized_amount)}`}
+            {selected.size} смен · {fmtHours(totalHours)} · заработано {fmtUSD(earned)}
           </div>
 
           {hasAmount && bonus > 0 && (
@@ -222,13 +283,12 @@ export default function PayoutReceiptCapture() {
           {step === 'saved' && <p className="text-success text-center font-medium">✓ Выплата сохранена</p>}
 
           <div className="flex gap-3">
-            <button onClick={cancel} disabled={step === 'saving'} className="flex-1 rounded-xl py-3 bg-bg-3 text-text-muted">Отменить</button>
+            <button onClick={() => setStep('receipt')} disabled={step === 'saving' || step === 'saved'} className="flex-1 rounded-xl py-3 bg-bg-3 text-text-muted">← Назад</button>
             <button onClick={confirm} disabled={!canConfirm || step === 'saving' || step === 'saved'}
               className={`flex-1 rounded-xl py-3 font-semibold ${canConfirm && step !== 'saving' ? 'bg-accent text-bg-2 hover:bg-accent-2' : 'bg-bg-3 text-text-muted'}`}>
-              {step === 'saving' ? 'Сохраняем…' : 'Подтвердить и сохранить'}
+              {step === 'saving' ? 'Сохраняем…' : 'Сохранить выплату'}
             </button>
           </div>
-          <button onClick={retry} disabled={step === 'saving' || step === 'saved'} className="w-full text-text-muted text-sm">Сфотографировать заново</button>
         </div>
       )}
     </div>

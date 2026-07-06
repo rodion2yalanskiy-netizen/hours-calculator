@@ -68,6 +68,13 @@ export interface Shift {
   start_min: number | null;
   end_min: number | null;
   lunch_skipped: boolean;
+  is_paid?: boolean;            // Слой 8: входит ли смена в выплату
+  payout_id?: string | null;
+}
+
+// Слой 8: неоплаченная смена (для выбора при создании выплаты); + week_start для группировки.
+export interface UnpaidShift extends Shift {
+  week_start: string;
 }
 
 export interface Settings {
@@ -109,11 +116,20 @@ export interface TeamMember {
 
 export type ReviewStatus = 'confirmed' | 'pending_review' | 'invalid';
 
+// Слой 8: смена, покрытая выплатой (для отображения на карточке выплаты).
+export interface CoveredShift {
+  id: number;
+  date: string;
+  object_name: string;
+  calculated_hours: number;
+  money: number;
+}
+
 export interface Payout {
   id: string;
   worker_id: number;
-  week_start: string;
-  week_end: string;
+  week_start: string | null;   // Слой 8: min дата покрытых смен (справочно, может быть null)
+  week_end: string | null;     // max дата
   amount_paid: number;
   shortfall_reason: 'debt' | 'fine' | null;
   shortfall_note: string | null;
@@ -121,6 +137,8 @@ export interface Payout {
   receipt_id: string | null;
   review_status: ReviewStatus | null;
   review_note: string | null;
+  covered_shifts: CoveredShift[];  // Слой 8: какие смены покрывает чек
+  shift_ids: number[];
   earned_by_hours: number;
   bonus: number;
   shortfall: number;
@@ -226,6 +244,14 @@ export async function getShifts(year: number, month: number, worker_id?: number)
   return apiFetch<Shift[]>(`/shifts?${q.toString()}`);
 }
 
+/** Слой 8: неоплаченные смены работника (для выбора при создании выплаты). */
+export async function getUnpaidShifts(worker_id?: number): Promise<UnpaidShift[]> {
+  const q = new URLSearchParams();
+  if (worker_id != null) q.set('worker_id', String(worker_id));
+  const qs = q.toString();
+  return apiFetch<UnpaidShift[]>(`/shifts/unpaid${qs ? `?${qs}` : ''}`);
+}
+
 export async function updateShift(id: number, body: {
   date?: string; object_name?: string; start_min?: number; end_min?: number; hours?: number; has_lunch?: boolean;
 }): Promise<Shift> {
@@ -300,14 +326,15 @@ export async function getPayouts(params: { worker_id?: number; from?: string; to
   const qs = q.toString();
   return apiFetch<Payout[]>(`/payouts${qs ? `?${qs}` : ''}`);
 }
+// Слой 8: выплата по выбранным сменам (чек опционален).
 export async function createPayout(body: {
-  week_start: string; week_end: string; amount_paid: number;
+  shift_ids: number[]; amount_paid: number; receipt_id?: string;
   shortfall_reason?: 'debt' | 'fine'; shortfall_note?: string;
 }): Promise<Payout> {
   return apiFetch<Payout>('/payouts', { method: 'POST', body: JSON.stringify(body) });
 }
 export async function updatePayout(id: string, body: {
-  amount_paid?: number; receipt_id?: string; shortfall_reason?: 'debt' | 'fine' | null; shortfall_note?: string;
+  amount_paid?: number; shortfall_reason?: 'debt' | 'fine' | null; shortfall_note?: string;
 }): Promise<Payout> {
   return apiFetch<Payout>(`/payouts/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
 }
@@ -331,8 +358,9 @@ export async function uploadReceipt(file: File): Promise<ReceiptUploadResponse> 
   return (await res.json()) as ReceiptUploadResponse;
 }
 
+// Слой 8: чек + выбранные смены (receipt_id обязателен).
 export async function createPayoutFromReceipt(body: {
-  receipt_id: string; week_start: string; week_end: string; confirmed_amount: number;
+  receipt_id: string; shift_ids: number[]; confirmed_amount: number;
   shortfall_reason?: 'debt' | 'fine'; shortfall_note?: string;
 }): Promise<Payout> {
   return apiFetch<Payout>('/payouts/from-receipt', { method: 'POST', body: JSON.stringify(body) });

@@ -102,18 +102,29 @@ async def weekly_summary(worker_id: int, tenant: int, week_start: dt.date) -> di
     earned, hours, cnt = await earned_for_week(worker_id, tenant, week_start, week_end)
     worker_name = await db.fetchval("SELECT name FROM workers WHERE id=$1", worker_id)
 
-    p = await db.fetchrow(
-        "SELECT amount_paid, shortfall_reason, shortfall_note, paid_at "
-        "FROM weekly_payouts WHERE worker_id=$1 AND week_start=$2",
-        worker_id, week_start,
+    # Слой 8: выплаты теперь по произвольным сменам. Для НЕДЕЛЬНОЙ сводки привязываем
+    # выплату к календарной неделе её первой смены (week_start=min дата ∈ [week_start,week_end]),
+    # так каждая выплата попадает ровно в одну неделю (без задвоения). При нескольких —
+    # суммируем сумму, детали берём из последней.
+    agg = await db.fetchrow(
+        "SELECT COALESCE(SUM(amount_paid),0) AS amount_paid, COUNT(*) AS cnt "
+        "FROM weekly_payouts WHERE worker_id=$1 AND week_start BETWEEN $2 AND $3",
+        worker_id, week_start, week_end,
     )
+    p = None
+    if agg is not None and agg["cnt"] > 0:
+        p = await db.fetchrow(
+            "SELECT shortfall_reason, shortfall_note, paid_at FROM weekly_payouts "
+            "WHERE worker_id=$1 AND week_start BETWEEN $2 AND $3 ORDER BY paid_at DESC LIMIT 1",
+            worker_id, week_start, week_end,
+        )
 
     payout = None
     bonus = 0.0
     shortfall = 0.0
     status = "unpaid"
     if p is not None:
-        amount_paid = float(p["amount_paid"])
+        amount_paid = float(agg["amount_paid"])
         payout = {
             "amount_paid": amount_paid,
             "shortfall_reason": p["shortfall_reason"],

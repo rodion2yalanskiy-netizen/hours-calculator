@@ -486,11 +486,18 @@ function ShiftCard({ s, onCopy, onEdit, onDelete }: {
           {s.start_min != null && s.end_min != null && (
             <div className="text-text-3 text-sm mt-1">{fmtRangeAmPm(s.start_min, s.end_min)}</div>
           )}
-          {s.lunch_skipped && (
-            <div className="inline-flex items-center gap-1 mt-1.5 text-warning text-xs bg-warning/10 border border-warning/30 rounded-lg px-2 py-0.5">
-              🍽 без обеда
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            {s.lunch_skipped && (
+              <span className="inline-flex items-center gap-1 text-warning text-xs bg-warning/10 border border-warning/30 rounded-lg px-2 py-0.5">
+                🍽 без обеда
+              </span>
+            )}
+            {s.is_paid && (
+              <span className="inline-flex items-center gap-1 text-success text-xs bg-accent-dim border border-accent/30 rounded-lg px-2 py-0.5">
+                ✓ оплачено
+              </span>
+            )}
+          </div>
         </div>
         <div className="text-right shrink-0 pl-3">
           <div className="font-semibold">{fmtHours(s.calculated_hours)}</div>

@@ -5,6 +5,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")        # тот же токен бота 
 DATABASE_URL = os.getenv("DATABASE_URL", "")  # новый Postgres (не база CRM!)
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))    # numeric Telegram id владельца
 CORS_ORIGIN = os.getenv("CORS_ORIGIN", "*")   # домен Vercel; на этапе сборки "*", перед приёмкой сузить
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "false").lower() == "true"  # /docs, /redoc, /openapi.json — выкл. по умолчанию (публично не светим структуру API)
 
 # ── Слой 2: аутентификация (JWT + supervisor-сид) ────────────────────────────
 # Родион задаёт эти переменные в Railway перед деплоем. Секреты НЕ в коде.

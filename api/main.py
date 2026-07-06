@@ -27,7 +27,7 @@ from settings import router as settings_router
 from push import router as push_router
 import scheduler as sched
 from db import run_migrations
-from config import CORS_ORIGIN, JWT_SECRET
+from config import CORS_ORIGIN, JWT_SECRET, ENABLE_DOCS
 import calc
 import logic
 import notifier
@@ -68,7 +68,13 @@ async def lifespan(app: FastAPI):
         sched.stop()
 
 
-app = FastAPI(title="Калькулятор часов API", lifespan=lifespan)
+app = FastAPI(
+    title="Калькулятор часов API",
+    lifespan=lifespan,
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
 
 # CORS: фронт (Vercel) → API (Railway). На сборке CORS_ORIGIN="*", перед приёмкой — домен Vercel.
 app.add_middleware(

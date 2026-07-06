@@ -115,9 +115,10 @@ export default function PayoutReceiptCapture() {
       <button onClick={() => navigate('/payouts')} className="rounded-xl px-4 py-2 bg-bg-3">← К выплатам</button></div>;
   }
 
-  const notReceipt = step === 'result' && uploaded && !uploaded.is_receipt_confirmed;
-  const noAmount = step === 'result' && uploaded && uploaded.is_receipt_confirmed && uploaded.recognized_amount == null;
-  const good = step === 'result' && uploaded && uploaded.is_receipt_confirmed && uploaded.recognized_amount != null;
+  // 7f: экран не блокирует. Как только фото загружено — всегда даём вписать сумму вручную.
+  const showForm = uploaded && (step === 'result' || step === 'saving' || step === 'saved');
+  const notRecognized = uploaded && !uploaded.is_receipt_confirmed;
+  const amountUnread = uploaded && uploaded.is_receipt_confirmed && uploaded.recognized_amount == null;
 
   return (
     <div className="relative">
@@ -159,31 +160,29 @@ export default function PayoutReceiptCapture() {
         <img src={preview} alt="Чек" className="w-full max-h-64 object-contain rounded-2xl border border-border mb-4 bg-bg-3" />
       )}
 
-      {/* A. Не чек */}
-      {notReceipt && (
-        <div className="bg-bg-2 border border-danger/40 rounded-2xl p-4">
-          <p className="text-danger font-medium mb-1">Похоже, это не чек</p>
-          <p className="text-text-muted text-sm mb-3">На фотографии должен быть чек, банковская выписка или скриншот перевода. {uploaded?.notes}</p>
-          <button onClick={retry} className="w-full rounded-xl py-3 bg-accent text-bg-2 font-semibold">Сфотографировать заново</button>
-        </div>
-      )}
-
-      {/* B. Чек, но сумма не прочитана */}
-      {noAmount && (
-        <div className="bg-bg-2 border border-warning/40 rounded-2xl p-4">
-          <p className="text-warning font-medium mb-1">Это похоже на чек, но сумму прочитать не удалось</p>
-          <p className="text-text-muted text-sm mb-3">Сфотографируйте лучше — не в темноте, без бликов.</p>
-          <button onClick={retry} className="w-full rounded-xl py-3 bg-accent text-bg-2 font-semibold">Сфотографировать заново</button>
-        </div>
-      )}
-
-      {/* C. Чек + сумма → подтверждение */}
-      {(good || step === 'saving' || step === 'saved') && uploaded && (
+      {/* Форма: фото загружено → всегда даём вписать сумму (ИИ не блокирует, 7f). */}
+      {showForm && uploaded && (
         <div className="space-y-4">
-          <div className="bg-bg-3 border border-border rounded-xl p-4 text-center">
-            <p className="text-text-muted text-xs">Распознано на чеке</p>
-            <p className="text-3xl font-bold text-accent">{fmtUSD(uploaded.recognized_amount ?? 0)}</p>
-          </div>
+          {/* Мягкий баннер, если ИИ не распознал — не блокирует, просто предупреждает. */}
+          {notRecognized && (
+            <div className="bg-bg-2 border border-warning/40 rounded-2xl p-4">
+              <p className="text-warning font-medium mb-1">ИИ не распознал чек автоматически</p>
+              <p className="text-text-muted text-sm">Ничего страшного — впишите сумму сами. Старший проверит фото вручную.{uploaded.notes ? ` (${uploaded.notes})` : ''}</p>
+            </div>
+          )}
+          {amountUnread && (
+            <div className="bg-bg-2 border border-warning/40 rounded-2xl p-4">
+              <p className="text-warning font-medium mb-1">Сумму не удалось прочитать</p>
+              <p className="text-text-muted text-sm">Впишите сумму вручную. Можно переснять для более чёткого фото.</p>
+            </div>
+          )}
+
+          {uploaded.recognized_amount != null && (
+            <div className="bg-bg-3 border border-border rounded-xl p-4 text-center">
+              <p className="text-text-muted text-xs">Распознано на чеке</p>
+              <p className="text-3xl font-bold text-accent">{fmtUSD(uploaded.recognized_amount)}</p>
+            </div>
+          )}
 
           <label className="block">
             <span className="text-text-3 text-xs">Получено от босса, $ (можно поправить)</span>
@@ -193,7 +192,7 @@ export default function PayoutReceiptCapture() {
           </label>
 
           <div className="bg-bg-3 rounded-xl px-4 py-2 text-sm text-text-muted">
-            Отработано: {fmtUSD(earned)} · Распознано: {fmtUSD(uploaded.recognized_amount ?? 0)}
+            Отработано: {fmtUSD(earned)}{uploaded.recognized_amount != null && ` · Распознано: ${fmtUSD(uploaded.recognized_amount)}`}
           </div>
 
           {hasAmount && bonus > 0 && (

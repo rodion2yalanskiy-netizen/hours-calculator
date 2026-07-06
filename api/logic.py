@@ -81,6 +81,15 @@ async def is_team_worker(worker_id: int, tenant: int) -> bool:
     ) is not None
 
 
+async def supervisor_worker_id(tenant: int) -> int | None:
+    """worker_id активного supervisor'а команды (для push-уведомлений ему)."""
+    return await db.fetchval(
+        "SELECT u.worker_id FROM users u JOIN workers w ON w.id = u.worker_id "
+        "WHERE w.user_id=$1 AND u.role='supervisor' AND u.is_active=true ORDER BY u.created_at LIMIT 1",
+        tenant,
+    )
+
+
 # ── Недельная сводка (используется /payouts, /summary) ────────────────────────
 async def weekly_summary(worker_id: int, tenant: int, week_start: dt.date) -> dict:
     """Полная сводка по одному работнику за одну неделю."""

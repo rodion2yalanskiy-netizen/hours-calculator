@@ -11,6 +11,7 @@ import { fmtUSD, fmtHours } from '../format';
 import { IconChevL, IconChevR, IconCheckCircle, IconCoins, IconAlertTriangle, IconClock, IconCamera, IconPaperclip } from '../components/icons';
 import PayoutReasonModal from '../components/PayoutReasonModal';
 import ReceiptViewer from '../components/ReceiptViewer';
+import ReceiptReviewControls from '../components/ReceiptReviewControls';
 
 export default function PayoutsPage() {
   const { user } = useAuth();
@@ -127,8 +128,10 @@ export default function PayoutsPage() {
           {shown.map((wk) => (
             <WeekCard key={wk.week_start} wk={wk} payout={payoutMap[wk.week_start] ?? null}
               isCurrent={wk.week_start === currentWeek}
+              role={user?.role === 'supervisor' ? 'supervisor' : 'worker'}
               onCapture={() => onCapture(wk)} onEdit={() => onEdit(wk)}
-              onViewReceipt={(rid) => setViewerReceiptId(rid)} />
+              onViewReceipt={(rid) => setViewerReceiptId(rid)}
+              onReviewed={() => { showToast('Статус чека обновлён'); load(); }} />
           ))}
         </div>
       )}
@@ -160,9 +163,11 @@ function Row({ label, value, valueCls }: { label: string; value: string; valueCl
   );
 }
 
-function WeekCard({ wk, payout, isCurrent, onCapture, onEdit, onViewReceipt }: {
+function WeekCard({ wk, payout, isCurrent, role, onCapture, onEdit, onViewReceipt, onReviewed }: {
   wk: WeeklySummary; payout: Payout | null; isCurrent: boolean;
+  role: 'supervisor' | 'worker';
   onCapture: () => void; onEdit: () => void; onViewReceipt: (receiptId: string) => void;
+  onReviewed: () => void;
 }) {
   const paid = payout != null;
   return (
@@ -203,6 +208,8 @@ function WeekCard({ wk, payout, isCurrent, onCapture, onEdit, onViewReceipt }: {
       <div className="mt-3 pt-3 border-t border-border">
         <StatusLine wk={wk} />
       </div>
+
+      {payout && <ReceiptReviewControls payout={payout} role={role} onReviewed={onReviewed} />}
     </div>
   );
 }

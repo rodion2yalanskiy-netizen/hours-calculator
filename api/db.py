@@ -15,7 +15,7 @@ _MIGRATION_LOCK_KEY = 4920215
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).parent / "migrations"
 # Применяются по порядку на каждом старте (все идемпотентны: IF NOT EXISTS).
-_MIGRATION_FILES = ["001_init.sql", "002_receipts.sql", "003_settings.sql", "004_push_and_reports.sql", "005_lunch_skipped.sql"]
+_MIGRATION_FILES = ["001_init.sql", "002_receipts.sql", "003_settings.sql", "004_push_and_reports.sql", "005_lunch_skipped.sql", "006_receipt_review.sql"]
 
 
 async def get_pool() -> asyncpg.Pool:

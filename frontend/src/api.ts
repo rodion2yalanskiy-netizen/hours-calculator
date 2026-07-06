@@ -107,6 +107,8 @@ export interface TeamMember {
   created_at: string;
 }
 
+export type ReviewStatus = 'confirmed' | 'pending_review' | 'invalid';
+
 export interface Payout {
   id: string;
   worker_id: number;
@@ -117,6 +119,8 @@ export interface Payout {
   shortfall_note: string | null;
   paid_at: string;
   receipt_id: string | null;
+  review_status: ReviewStatus | null;
+  review_note: string | null;
   earned_by_hours: number;
   bonus: number;
   shortfall: number;
@@ -126,6 +130,7 @@ export interface ReceiptUploadResponse {
   receipt_id: string;
   is_receipt_confirmed: boolean;
   recognized_amount: number | null;
+  review_status: ReviewStatus;
   notes: string;
   file_url: string;
 }
@@ -335,6 +340,18 @@ export async function createPayoutFromReceipt(body: {
 
 export async function deleteReceipt(id: string): Promise<void> {
   await apiFetch<{ ok: boolean }>(`/receipts/${id}`, { method: 'DELETE' });
+}
+
+/** Supervisor помечает чек: confirmed / pending_review / invalid (+ заметка). */
+export async function reviewReceipt(
+  id: string,
+  review_status: ReviewStatus,
+  review_note?: string,
+): Promise<{ id: string; worker_id: number; review_status: ReviewStatus; review_note: string | null; reviewed_at: string | null }> {
+  return apiFetch(`/receipts/${id}/review`, {
+    method: 'PATCH',
+    body: JSON.stringify({ review_status, review_note: review_note ?? null }),
+  });
 }
 
 export interface ReceiptMeta {

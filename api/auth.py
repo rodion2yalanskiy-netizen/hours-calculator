@@ -3,6 +3,7 @@
 JWT + bcrypt вынесены в security.py; текущий пользователь — через deps.require_auth.
 Прежняя Telegram-проверка (require_owner) удалена — доступ теперь по JWT.
 """
+import asyncio
 import re
 
 import asyncpg
@@ -10,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import db
+import logic
+import notifier
 from security import verify_password, hash_password, create_access_token
 from deps import require_auth, CurrentUser
 
@@ -96,20 +99,27 @@ async def _user_dict(user_id: str) -> dict:
 
 @router.patch("/me")
 async def patch_me(body: ProfilePatch, current: CurrentUser = Depends(require_auth)):
-    """Изменить своё имя (все) и ставку (только supervisor). НЕ трогает
-    hourly_rate_snapshot существующих смен. Имя синхронизируется в workers.name."""
+    """Изменить своё имя и СВОЮ ставку (7f: worker тоже может). Вариант A: новая ставка
+    применяется только к БУДУЩИМ сменам — hourly_rate_snapshot существующих НЕ пересчитываем.
+    Имя синхронизируется в workers.name. При смене ставки работником — push supervisor'у."""
     sets, args = [], []
     new_name: str | None = None
+    rate_changed = False
+    old_rate = float(current.hourly_rate)
+    new_rate = old_rate
     if body.full_name is not None:
         new_name = body.full_name.strip()
         if len(new_name) < 2:
             raise HTTPException(status_code=400, detail="full_name must be at least 2 characters")
         sets.append(f"full_name=${len(args) + 1}")
         args.append(new_name)
-    # Ставку меняет только supervisor; у worker'а поле молча игнорируем.
-    if body.hourly_rate is not None and current.role == "supervisor":
+    # 7f: свою ставку меняет любой (worker тоже). Snapshot прошлых смен не трогается.
+    if body.hourly_rate is not None:
         if body.hourly_rate <= 0:
             raise HTTPException(status_code=400, detail="hourly_rate must be > 0")
+        new_rate = float(body.hourly_rate)
+        if new_rate != old_rate:
+            rate_changed = True
         sets.append(f"hourly_rate=${len(args) + 1}")
         args.append(body.hourly_rate)
 
@@ -133,7 +143,26 @@ async def patch_me(body: ProfilePatch, current: CurrentUser = Depends(require_au
                     )
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="worker name already in use")
+
+    # 7f: работник сменил свою ставку → push supervisor'у. supervisor за себя — без self-push.
+    if rate_changed and current.role == "worker" and current.worker_id is not None:
+        asyncio.create_task(_notify_rate_change(
+            current.id, current.full_name, current.worker_id, old_rate, new_rate,
+        ))
     return await _user_dict(current.user_id)
+
+
+async def _notify_rate_change(tenant: int, worker_name: str, worker_id: int,
+                              old_rate: float, new_rate: float) -> None:
+    """Push supervisor'у: работник изменил свою ставку. Себе не шлём."""
+    sup_worker_id = await logic.supervisor_worker_id(tenant)
+    if sup_worker_id is None or sup_worker_id == worker_id:
+        return
+    await notifier.push_to_worker(
+        sup_worker_id, "Смена ставки",
+        f"{worker_name} изменил свою ставку: ${old_rate:g} → ${new_rate:g}/час",
+        url="/team",
+    )
 
 
 _HAS_LETTER = re.compile(r"[A-Za-z]")

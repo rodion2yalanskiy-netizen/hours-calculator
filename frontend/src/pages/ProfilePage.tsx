@@ -20,7 +20,8 @@ export default function ProfilePage() {
   const roleLabel = isSup ? 'Супервайзер' : 'Работник';
   const rateNum = parseFloat(rate);
   const nameChanged = name.trim() !== user.full_name;
-  const rateChanged = isSup && Number.isFinite(rateNum) && rateNum !== user.hourly_rate;
+  // 7f: свою ставку теперь может менять и работник (применится только к будущим сменам).
+  const rateChanged = Number.isFinite(rateNum) && rateNum !== user.hourly_rate;
   const changed = nameChanged || rateChanged;
 
   const showToast = (m: string) => { setToast(m); window.setTimeout(() => setToast(null), 2000); };
@@ -69,14 +70,12 @@ export default function ProfilePage() {
 
         <div>
           <span className="text-text-3 text-xs">Ставка, $/час</span>
-          {isSup ? (
-            <input type="number" step="0.01" min="0" value={rate} onChange={(e) => setRate(e.target.value)} className={inputCls} />
-          ) : (
-            <p className="mt-1 font-medium flex items-center gap-2">
-              ${user.hourly_rate}/час
-              <span className="text-text-muted text-xs">🔒 меняется старшим</span>
-            </p>
-          )}
+          <input type="number" step="0.01" min="0" value={rate} onChange={(e) => setRate(e.target.value)} className={inputCls} />
+          <span className="text-text-muted text-xs mt-1 block">
+            {isSup
+              ? 'Новая ставка применяется только к будущим сменам — прошлые не пересчитываются.'
+              : 'Можешь менять свою ставку. Она применится только к будущим сменам (прошлые не меняются). Старший получит уведомление об изменении.'}
+          </span>
         </div>
 
         {error && <p className="text-danger text-sm">{error}</p>}

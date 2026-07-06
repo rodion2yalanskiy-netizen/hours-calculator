@@ -9,6 +9,7 @@ import { monthRange, monthLabel, addMonths, isFutureMonth } from '../period';
 import { fmtMoney, fmtHours, fmtCardDate } from '../format';
 import { IconChevL, IconChevR } from '../components/icons';
 import EditMemberModal from '../components/EditMemberModal';
+import ReceiptReviewControls from '../components/ReceiptReviewControls';
 
 function payoutBadge(p: Payout): { label: string; cls: string } {
   if (p.bonus > 0) return { label: `Бонус +${fmtMoney(p.bonus)}`, cls: 'text-success' };
@@ -35,6 +36,7 @@ export default function TeamMemberPage() {
   const [showEdit, setShowEdit] = useState(false);
   const [pwNotice, setPwNotice] = useState<string | null>(null);
   const [showAllPayouts, setShowAllPayouts] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
 
   const isSelf = userId === user?.id;
 
@@ -63,7 +65,7 @@ export default function TeamMemberPage() {
     }).catch(() => { if (!cancelled) { setPeriod(null); setShifts([]); setPayouts([]); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wid, monthTs]);
+  }, [wid, monthTs, reloadTick]);
 
   if (notFound) {
     return (
@@ -170,7 +172,9 @@ export default function TeamMemberPage() {
         {payouts.length === 0 ? (
           <p className="text-text-muted text-sm">Выплат нет.</p>
         ) : (
-          <div className="space-y-2">{payouts.map((p) => <PayoutRow key={p.id} p={p} />)}</div>
+          <div className="space-y-2">{payouts.map((p) => (
+            <PayoutRow key={p.id} p={p} role={user?.role === 'supervisor' ? 'supervisor' : 'worker'} onReviewed={() => setReloadTick((t) => t + 1)} />
+          ))}</div>
         )}
         <button onClick={() => setShowAllPayouts(true)} className="mt-3 w-full rounded-xl py-2.5 bg-bg-3 text-sm hover:text-accent">
           Все выплаты работника →
@@ -196,7 +200,9 @@ export default function TeamMemberPage() {
             {payouts.length === 0 ? (
               <p className="text-text-muted text-sm">За выбранный месяц выплат нет. Полный список — в разделе Выплаты (скоро).</p>
             ) : (
-              <div className="space-y-2">{payouts.map((p) => <PayoutRow key={p.id} p={p} detailed />)}</div>
+              <div className="space-y-2">{payouts.map((p) => (
+                <PayoutRow key={p.id} p={p} detailed role={user?.role === 'supervisor' ? 'supervisor' : 'worker'} onReviewed={() => setReloadTick((t) => t + 1)} />
+              ))}</div>
             )}
           </div>
         </div>
@@ -214,15 +220,21 @@ function Row({ label, value, valueCls }: { label: string; value: string; valueCl
   );
 }
 
-function PayoutRow({ p, detailed }: { p: Payout; detailed?: boolean }) {
+function PayoutRow({ p, detailed, role, onReviewed }: {
+  p: Payout; detailed?: boolean;
+  role: 'supervisor' | 'worker'; onReviewed: () => void;
+}) {
   const badge = payoutBadge(p);
   return (
-    <div className="flex items-center justify-between text-sm border-b border-border last:border-0 pb-2 last:pb-0">
-      <div className="min-w-0">
-        <div className="truncate">{p.week_start} – {p.week_end}</div>
-        {detailed && <div className="text-text-muted text-xs">заработано {fmtMoney(p.earned_by_hours)} · получено {fmtMoney(p.amount_paid)}</div>}
+    <div className="border-b border-border last:border-0 pb-2 last:pb-0">
+      <div className="flex items-center justify-between text-sm">
+        <div className="min-w-0">
+          <div className="truncate">{p.week_start} – {p.week_end}</div>
+          {detailed && <div className="text-text-muted text-xs">заработано {fmtMoney(p.earned_by_hours)} · получено {fmtMoney(p.amount_paid)}</div>}
+        </div>
+        <span className={`shrink-0 font-medium ${badge.cls}`}>{badge.label}</span>
       </div>
-      <span className={`shrink-0 font-medium ${badge.cls}`}>{badge.label}</span>
+      {p.receipt_id && <ReceiptReviewControls payout={p} role={role} onReviewed={onReviewed} />}
     </div>
   );
 }

@@ -222,13 +222,24 @@ async def shifts_preview(body: PreviewBody, user=Depends(require_auth)):
     return res
 
 
-async def _notify_lunch_skipped(tenant: int, worker_name: str, worker_id: int, d, object_name: str) -> None:
-    """Push supervisor'у команды, что работник не вычел обед. Себе не шлём."""
-    sup_worker_id = await db.fetchval(
-        "SELECT u.worker_id FROM users u JOIN workers w ON w.id = u.worker_id "
-        "WHERE w.user_id=$1 AND u.role='supervisor' AND u.is_active=true ORDER BY u.created_at LIMIT 1",
-        tenant,
+async def _notify_shift_created(tenant: int, worker_name: str, worker_id: int, d, object_name: str,
+                                hours: float, lunch_skipped: bool) -> None:
+    """Push supervisor'у: работник внёс смену (7f). Одно уведомление; если обед не вычтен —
+    добавляем пометку «без обеда». Себе (supervisor за себя) не шлём."""
+    sup_worker_id = await logic.supervisor_worker_id(tenant)
+    if sup_worker_id is None or sup_worker_id == worker_id:
+        return
+    body_txt = f"{worker_name} внёс смену — {d.isoformat()}, {object_name}, {hours:g}ч"
+    if lunch_skipped:
+        body_txt += " (без обеда)"
+    await notifier.push_to_worker(
+        sup_worker_id, "Новая смена", body_txt, url=f"/shifts?worker_id={worker_id}",
     )
+
+
+async def _notify_lunch_skipped(tenant: int, worker_name: str, worker_id: int, d, object_name: str) -> None:
+    """Push supervisor'у команды, что работник не вычел обед (используется при правке смены). Себе не шлём."""
+    sup_worker_id = await logic.supervisor_worker_id(tenant)
     if sup_worker_id is None or sup_worker_id == worker_id:
         return
     await notifier.push_to_worker(
@@ -287,9 +298,12 @@ async def create_shift(body: ShiftCreate, user=Depends(require_auth)):
 
     # suppress_notification honor'им ТОЛЬКО у supervisor'а (worker не может заглушить алерт о себе).
     suppress = body.suppress_notification and user.role == "supervisor"
-    # Обед не вычтен + создаёт РАБОТНИК (не supervisor) + не заглушено → push supervisor'у (не блокируя ответ).
-    if lunch_skipped and not suppress and user.role == "worker":
-        asyncio.create_task(_notify_lunch_skipped(user.id, user.full_name, worker_id, d, object_name))
+    # 7f: работник внёс смену → ОДНО уведомление supervisor'у («внёс смену» + пометка «без обеда»).
+    # supervisor за себя — не уведомляем (proceed без push).
+    if not suppress and user.role == "worker":
+        asyncio.create_task(_notify_shift_created(
+            user.id, user.full_name, worker_id, d, object_name, hours_val, lunch_skipped,
+        ))
 
     hours = float(shift["calculated_hours"])
     snapshot = float(shift["hourly_rate_snapshot"])

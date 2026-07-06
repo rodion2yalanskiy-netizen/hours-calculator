@@ -4,6 +4,7 @@
 current_user.worker_id и для worker, и для supervisor). earned_by_hours не хранится —
 считается из shifts на лету.
 """
+import asyncio
 import os
 from datetime import date as date_cls
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 
 import db
 import logic
+import notifier
 from deps import require_auth, CurrentUser
 
 router = APIRouter(prefix="/payouts", tags=["payouts"])
@@ -58,10 +60,23 @@ def _own_worker_id(current: CurrentUser) -> int:
 
 
 async def _enrich(row, tenant: int) -> dict:
-    """Добавить earned_by_hours / bonus / shortfall к строке payout."""
+    """Добавить earned_by_hours / bonus / shortfall + статус ревью чека к строке payout."""
     ws, we = row["week_start"], row["week_end"]
     earned, _hours, _cnt = await logic.earned_for_week(row["worker_id"], tenant, ws, we)
     amount_paid = float(row["amount_paid"])
+
+    # Статус ревью привязанного чека (7f): supervisor мог пометить invalid.
+    review_status = None
+    review_note = None
+    if row["receipt_id"]:
+        rec = await db.fetchrow(
+            "SELECT review_status, review_note FROM receipts WHERE id=$1",
+            row["receipt_id"],
+        )
+        if rec is not None:
+            review_status = rec["review_status"]
+            review_note = rec["review_note"]
+
     return {
         "id": str(row["id"]),
         "worker_id": row["worker_id"],
@@ -72,6 +87,8 @@ async def _enrich(row, tenant: int) -> dict:
         "shortfall_note": row["shortfall_note"],
         "paid_at": row["paid_at"].isoformat(),
         "receipt_id": str(row["receipt_id"]) if row["receipt_id"] else None,
+        "review_status": review_status,
+        "review_note": review_note,
         "earned_by_hours": round(earned, 2),
         "bonus": round(max(0.0, amount_paid - earned), 2),
         "shortfall": round(max(0.0, earned - amount_paid), 2),
@@ -151,15 +168,15 @@ async def create_payout_from_receipt(body: PayoutFromReceipt, current: CurrentUs
     if we != logic.week_end_of(ws):
         raise HTTPException(status_code=400, detail="week_end must be week_start + 6 days (Sunday)")
 
-    # Чек: свой, подтверждён как чек, ещё не привязан.
+    # Чек: свой, ещё не привязан. 7f: ИИ больше не блокирует — is_receipt_confirmed
+    # не проверяем, обязательно только само наличие фото (receipt_id). Контроль —
+    # за supervisor'ом через PATCH /receipts/{id}/review.
     rec = await db.fetchrow(
-        "SELECT id, worker_id, is_receipt_confirmed FROM receipts WHERE id=$1::uuid",
+        "SELECT id, worker_id FROM receipts WHERE id=$1::uuid",
         body.receipt_id,
     )
     if rec is None or rec["worker_id"] != worker_id:
         raise HTTPException(status_code=404, detail="receipt not found")
-    if not rec["is_receipt_confirmed"]:
-        raise HTTPException(status_code=400, detail="receipt is not confirmed as a receipt")
     if await db.fetchval("SELECT 1 FROM weekly_payouts WHERE receipt_id=$1::uuid", body.receipt_id):
         raise HTTPException(status_code=400, detail="receipt already used for a payout")
 
@@ -185,7 +202,25 @@ async def create_payout_from_receipt(body: PayoutFromReceipt, current: CurrentUs
                 )
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="payout for this week already exists")
+
+    # 7f: работник прикрепил чек → push supervisor'у (себе не шлём).
+    if current.role == "worker":
+        asyncio.create_task(_notify_receipt_attached(
+            current.id, current.worker_id, ws.isoformat(), float(body.confirmed_amount)
+        ))
     return await _enrich(row, current.id)
+
+
+async def _notify_receipt_attached(tenant: int, worker_id: int, week_start: str, amount: float) -> None:
+    """Push supervisor'у: работник прикрепил чек за неделю."""
+    sup_wid = await logic.supervisor_worker_id(tenant)
+    if sup_wid is None or sup_wid == worker_id:
+        return  # нет supervisor'а или это он сам — не шлём
+    name = await db.fetchval("SELECT name FROM workers WHERE id=$1", worker_id) or "Работник"
+    await notifier.push_to_worker(
+        sup_wid, "Чек прикреплён",
+        f"{name} прикрепил чек за неделю {week_start} — ${amount:.2f}", "/payouts",
+    )
 
 
 @router.patch("/{payout_id}")

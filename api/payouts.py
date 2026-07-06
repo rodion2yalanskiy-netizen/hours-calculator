@@ -100,10 +100,20 @@ async def _covered_shifts(payout_id) -> list[dict]:
 
 
 async def _enrich(row, tenant: int) -> dict:
-    """Payout + earned_by_hours/bonus/shortfall + covered_shifts + ревью чека.
-    earned считается по покрытым сменам; для старых выплат (без payout_shifts) —
-    fallback на диапазон week_start..week_end."""
+    """Payout + earned_by_hours/bonus/shortfall + covered_shifts + ревью чека
+    (одиночная выплата — используется вне списочного эндпоинта)."""
     covered = await _covered_shifts(row["id"])
+    rec = None
+    if row["receipt_id"]:
+        rec = await db.fetchrow(
+            "SELECT review_status, review_note FROM receipts WHERE id=$1", row["receipt_id"]
+        )
+    return await _build_enriched(row, tenant, covered, rec)
+
+
+async def _build_enriched(row, tenant: int, covered: list[dict], rec) -> dict:
+    """Собрать enriched-словарь из уже загруженных данных (без запросов к БД,
+    кроме fallback earned_for_week для старых выплат без payout_shifts)."""
     if covered:
         earned = round(sum(c["money"] for c in covered), 2)
     elif row["week_start"] is not None and row["week_end"] is not None:
@@ -114,15 +124,8 @@ async def _enrich(row, tenant: int) -> dict:
 
     amount_paid = float(row["amount_paid"])
 
-    review_status = None
-    review_note = None
-    if row["receipt_id"]:
-        rec = await db.fetchrow(
-            "SELECT review_status, review_note FROM receipts WHERE id=$1", row["receipt_id"]
-        )
-        if rec is not None:
-            review_status = rec["review_status"]
-            review_note = rec["review_note"]
+    review_status = rec["review_status"] if rec is not None else None
+    review_note = rec["review_note"] if rec is not None else None
 
     return {
         "id": str(row["id"]),
@@ -185,7 +188,40 @@ async def list_payouts(
         f"ORDER BY p.paid_at DESC",
         *args,
     )
-    return [await _enrich(r, current.id) for r in rows]
+
+    payout_ids = [r["id"] for r in rows]
+    covered_map: dict = {}
+    if payout_ids:
+        shift_rows = await db.fetch(
+            "SELECT ps.payout_id, s.id, s.date, s.object_name, s.calculated_hours, s.hourly_rate_snapshot "
+            "FROM payout_shifts ps JOIN shifts s ON s.id = ps.shift_id "
+            "WHERE ps.payout_id = ANY($1::uuid[]) ORDER BY s.date",
+            payout_ids,
+        )
+        for r in shift_rows:
+            hours = float(r["calculated_hours"]) if r["calculated_hours"] is not None else 0.0
+            rate = float(r["hourly_rate_snapshot"]) if r["hourly_rate_snapshot"] is not None else 0.0
+            covered_map.setdefault(r["payout_id"], []).append({
+                "id": r["id"],
+                "date": r["date"].isoformat(),
+                "object_name": r["object_name"],
+                "calculated_hours": hours,
+                "money": logic.money(hours, rate),
+            })
+
+    receipt_ids = list({r["receipt_id"] for r in rows if r["receipt_id"]})
+    receipts_map: dict = {}
+    if receipt_ids:
+        rec_rows = await db.fetch(
+            "SELECT id, review_status, review_note FROM receipts WHERE id = ANY($1::uuid[])",
+            receipt_ids,
+        )
+        receipts_map = {rr["id"]: rr for rr in rec_rows}
+
+    return [
+        await _build_enriched(r, current.id, covered_map.get(r["id"], []), receipts_map.get(r["receipt_id"]))
+        for r in rows
+    ]
 
 
 # ── Ядро создания выплаты по выбранным сменам ─────────────────────────────────

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { changePassword, updateProfile } from '../api';
+import NotificationsSection from '../components/NotificationsSection';
 
 export default function ProfilePage() {
   const { user, logout, updateUser } = useAuth();
@@ -90,6 +91,9 @@ export default function ProfilePage() {
         className="w-full mt-4 rounded-2xl py-3.5 font-semibold bg-bg-2 border border-border-2 hover:border-accent">
         Сменить пароль
       </button>
+
+      {/* Уведомления — доступны всем (перенесено из Настроек, недоступных работнику). */}
+      <NotificationsSection />
 
       {pwOpen && <ChangePasswordModal onClose={() => setPwOpen(false)} onDone={logout} />}
 
